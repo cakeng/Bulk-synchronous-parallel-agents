@@ -1,0 +1,54 @@
+# vLLM Server Configuration
+# Model configuration - can be overridden by MODEL_NAME environment variable
+model:
+  # Model name or path (e.g., "Qwen/Qwen3-Next-80B-A3B-Thinking-FP8" or local path)
+  # name: "Qwen/Qwen3-30B-A3B-Instruct-2507"
+  # name: "Qwen/Qwen3.5-122B-A10B-FP8"
+  # name: "Qwen/Qwen3.5-4B"
+  name: "Qwen/Qwen3.5-27B"
+  
+  # Trust remote code (required for some models)
+  trust_remote_code: false
+
+# API Server Configuration
+server:
+  host: "127.0.0.1"
+  port: 18000
+  api_key: "12f34rtfq34er234T34GARW5G" # Set to a string if you want API key authentication
+
+# Generation Parameters
+generation:
+  temperature: 0.7
+  max_tokens: 32768
+  top_p: 0.9
+  top_k: 50
+
+# GPU/Device Configuration
+gpu:
+  # Specific GPU IDs to use (e.g., [6, 7] for GPUs 6 and 7)
+  # If null, all available GPUs will be used
+  # This sets CUDA_VISIBLE_DEVICES environment variable
+  gpu_ids: [3]
+  # GPU memory utilization (0.0 to 1.0)
+  gpu_memory_utilization: 0.92
+
+# Tensor Parallelism (for multi-GPU)
+tensor_parallel_size: 1
+
+# Model Context Length
+# Maximum sequence length the model can handle
+max_model_len: 240000
+
+# KV Cache Configuration
+# Data type for key-value cache (fp8, fp16, etc.)
+kv_cache_dtype: "auto"
+
+# Additional vLLM arguments
+# Enable tool calling support for LangGraph agents
+additional_args:
+  - "--enable-auto-tool-choice"
+  - "--tool-call-parser"
+  - "qwen3_coder"
+  - "--reasoning-parser"
+  - "qwen3"
+  - "--language-model-only"
