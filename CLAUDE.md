@@ -42,7 +42,7 @@ engine_state.pt         # Torch-serialised engine state (created at runtime)
 ### Key concepts
 
 **Agent** (`src/agent.py`)
-Each agent owns a flat `_vars` dict. Built-in keys always present: `agent_id`, `llm_config`, `chat_history`. Access is via `agent["key"]` (raises `KeyError` on missing) or `agent.key` (raises `AttributeError`). The `agent.chat(messages, **kwargs)` async method calls the vLLM server via `openai.AsyncOpenAI`.
+Each agent owns a flat `_vars` dict. Built-in keys always present: `agent_rank`, `llm_state`. `llm_state` contains `base_url`, `api_key`, `model`, and `context` (the chat message list). Access is via `agent["key"]` (raises `KeyError` on missing) or `agent.key` (raises `AttributeError`). The `agent.chat(messages, **kwargs)` async method calls the vLLM server via `openai.AsyncOpenAI`.
 
 **Operator** (`src/operator.py`)
 A single step in the execution chain. Define one subclass of `Operator` per file with an `async def run(self, agent)` method. Inside `run`, read agent state with `agent["var"]` and write new state with `agent["var"] = value` — writes persist to `engine_state.pt` after the step.
@@ -58,16 +58,16 @@ Created/overwritten by `engine.save_state()` via `torch.save`. Contains `{"agent
 ```python
 # operators/my_step.py
 from src.operator import Operator
+from src.run_agent import run_agent
 
 class MyStep(Operator):
-    async def run(self, agent):
-        history = agent["chat_history"]           # read (KeyError if missing)
-        history.append({"role": "user", "content": "Hello"})
-        response = await agent.chat(messages=history)
-        reply = response.choices[0].message.content
-        history.append({"role": "assistant", "content": reply})
-        agent["chat_history"] = history           # write back
-        agent["last_reply"] = reply               # new variable, persists
+    async def run(self, _local, _global):
+        parsed, raw, thinking, tool_calls, tokens = await run_agent(
+            user_input    = "Hello!",
+            output_config = {"reply": str},
+            agent_config  = _local["llm_state"],
+        )
+        _local["last_reply"] = parsed["reply"]    # new variable, persists
 ```
 
 Exactly one `Operator` subclass per file. The worker finds it by scanning `dir(module)`.

@@ -15,8 +15,9 @@ import importlib.util
 import pickle
 import sys
 
-from src.agent import Agent
-from src.operator import Operator
+from src.operator import (
+    Operator, ForkOperator, KillOperator, SortOperator, ShuffleOperator,
+)
 
 
 def _load_operator(operator_path: str) -> Operator:
@@ -34,11 +35,12 @@ def _load_operator(operator_path: str) -> Operator:
         if isinstance(obj, type)
         and issubclass(obj, Operator)
         and obj is not Operator
+        and obj not in (ForkOperator, KillOperator, SortOperator, ShuffleOperator)
     ]
     if not candidates:
         raise ValueError(
-            f"No Operator subclass found in '{operator_path}'. "
-            "Define a class that inherits from src.operator.Operator."
+            f"No concrete Operator subclass found in '{operator_path}'. "
+            "Define a class that inherits from one of the Operator types in src.operator."
         )
     if len(candidates) > 1:
         names = [c.__name__ for c in candidates]
@@ -49,27 +51,74 @@ def _load_operator(operator_path: str) -> Operator:
     return candidates[0]()
 
 
+def _validate_return(op_type: str, rv) -> None:
+    """Raise TypeError if ``rv`` does not match the expected type for ``op_type``."""
+    if op_type == "base":
+        if rv is not None:
+            raise TypeError(
+                f"Operator (base) must return None, got {type(rv).__name__!r}: {rv!r}."
+            )
+    elif op_type == "fork":
+        if isinstance(rv, bool) or not isinstance(rv, int) or rv < 0:
+            raise TypeError(
+                f"ForkOperator must return a non-negative int, "
+                f"got {type(rv).__name__!r}: {rv!r}."
+            )
+    elif op_type == "kill":
+        if not isinstance(rv, bool):
+            raise TypeError(
+                f"KillOperator must return a bool, "
+                f"got {type(rv).__name__!r}: {rv!r}."
+            )
+    elif op_type == "sort":
+        if isinstance(rv, bool) or not isinstance(rv, (int, float)):
+            raise TypeError(
+                f"SortOperator must return a float (or int), "
+                f"got {type(rv).__name__!r}: {rv!r}."
+            )
+    elif op_type == "shuffle":
+        if (
+            not isinstance(rv, tuple)
+            or len(rv) != 2
+            or not isinstance(rv[1], list)
+        ):
+            raise TypeError(
+                f"ShuffleOperator must return (Any, list[agent_rank]), "
+                f"got {type(rv).__name__!r}: {rv!r}."
+            )
+
+
 async def _main() -> None:
     parser = argparse.ArgumentParser(description="BSA agent worker subprocess")
-    parser.add_argument("--agent-state", required=True, help="Pickle file with agent state dict")
-    parser.add_argument("--operator", required=True, help="Path to operator .py file")
-    parser.add_argument("--output", required=True, help="Pickle file to write updated agent state")
+    parser.add_argument("--agent-state", required=True)
+    parser.add_argument("--operator",    required=True)
+    parser.add_argument("--output",      required=True)
     args = parser.parse_args()
 
-    # Load agent state
     with open(args.agent_state, "rb") as fh:
         state: dict = pickle.load(fh)
 
-    agent = Agent(agent_id=state["agent_id"])
-    agent.set_state(state)
+    # Split the flat state dict into the two operator arguments:
+    #   _local  — agent-specific variables
+    #   _global — engine-global variables (injected by the engine)
+    _global_dict: dict = state.pop("engine_globals", {})
+    _local_dict:  dict = state
 
-    # Load and run operator
-    operator = _load_operator(args.operator)
-    await operator.run(agent)
+    operator  = _load_operator(args.operator)
+    op_type   = operator.OPERATOR_TYPE
 
-    # Write updated state
+    rv = await operator.run(_local_dict, _global_dict)
+    _validate_return(op_type, rv)
+
+    # Rejoin so the engine can strip and merge engine_globals on return
+    result_state = {**_local_dict, "engine_globals": _global_dict}
+    output = {
+        "state":         result_state,
+        "return_value":  rv,
+        "operator_type": op_type,
+    }
     with open(args.output, "wb") as fh:
-        pickle.dump(agent.get_state(), fh)
+        pickle.dump(output, fh)
 
 
 if __name__ == "__main__":

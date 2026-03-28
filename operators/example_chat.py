@@ -1,28 +1,21 @@
-"""Example operator: sends a single user message and records the assistant reply.
+"""Example operator: LLM call with structured output enforcement via run_agent().
 
-Run:
-    python step_engine.py operators/example_chat.py
+Asks the model a simple arithmetic question and enforces a JSON response with
+two fields: ``answer`` (int) and ``explanation`` (str).
+
 """
 from src.operator import Operator
+from src.run_agent import run_agent
 
 
 class ExampleChat(Operator):
-    async def run(self, agent):
-        # Read the agent's chat history (built-in variable, always present)
-        history = agent["chat_history"]
+    async def run(self, _local, _global):
+        step = _global["step"]
 
-        # Append the user turn
-        history.append({"role": "user", "content": "What is 2 + 2? Reply in one sentence."})
+        parsed, raw, thinking, tool_calls, tokens = await run_agent(
+            user_input    = f"What is {_local['agent_rank']} + {step}?",
+            output_config = {"answer": int, "explanation": str},
+            agent_config  = _local["llm_state"],
+        )
 
-        # Call the LLM (uses agent's llm_config by default)
-        response = await agent.chat(messages=history)
-        reply = response.choices[0].message.content
-
-        # Append the assistant turn
-        history.append({"role": "assistant", "content": reply})
-
-        # Write back — this persists to the next step
-        agent["chat_history"] = history
-        agent["last_reply"] = reply
-
-        print(f"Agent {agent['agent_id']} — LLM replied: {reply}")
+        _local["rank_step_answer"] = parsed["answer"]

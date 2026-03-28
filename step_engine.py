@@ -115,25 +115,42 @@ async def main() -> None:
         debug=args.debug,
     )
 
+    if args.verbose:
+        _print_engine_overview(engine, run_name=args.run, verbose_level=args.verbose)
+
     engine.save_state(state_file)
 
 
 def _print_engine_overview(engine: Engine, run_name: str, verbose_level: int = 1) -> None:
     """Print a color-coded summary of the engine and all agent states."""
     n = len(engine.agents)
-    header = f"run={run_name}  {'1 agent' if n == 1 else f'{n} agents'}"
-    print(log.engine(f"\n  ╔══ ENGINE STATE ({header}) {'═' * max(0, 44 - len(header))}"))
+    full = verbose_level >= 2
+    header = f"run={run_name}  step={engine.globals.get('step', 0)}  {'1 agent' if n == 1 else f'{n} agents'}"
+    print(log.engine(f"\n  ╔══ ENGINE STATE ({header}) {'═' * max(0, 38 - len(header))}"))
+
+    # Engine-level globals
+    if engine.globals:
+        print(log.engine(f"  ║"))
+        print(log.engine(f"  ║  {log.bold('engine_globals')}"))
+        for k, v in engine.globals.items():
+            lines = log.format_value(v, full=full).splitlines()
+            print(log.engine(f"  ║    {log.bold(k)}: {log.dim(lines[0])}"))
+            for extra in lines[1:]:
+                print(log.engine(f"  ║      {log.dim(extra)}"))
+    else:
+        print(log.engine(f"  ║  {log.dim('engine_globals: (empty)')}"))
+
+    # Per-agent state
     for agent in engine.agents:
         state = agent.get_state()
-        aid = state.get("agent_id", "?")
-        cfg = state.get("llm_config", {})
+        rank = state.get("agent_rank", "?")
+        cfg = state.get("llm_state", {})
         print(log.engine(f"  ║"))
-        print(log.engine(f"  ║  Agent {aid}"))
-        print(log.engine(f"  ║    llm_config : {cfg.get('base_url', '?')}  model={cfg.get('model', '?')}"))
+        print(log.engine(f"  ║  Agent {rank}  —  {cfg.get('base_url', '?')}  model={cfg.get('model', '?')}"))
         for k, v in state.items():
-            if k in ("agent_id", "llm_config"):
+            if k in ("agent_rank", "llm_state"):
                 continue
-            lines = log.format_value(v, full=(verbose_level >= 2)).splitlines()
+            lines = log.format_value(v, full=full).splitlines()
             print(log.engine(f"  ║    {log.bold(k)}: {log.dim(lines[0])}"))
             for extra in lines[1:]:
                 print(log.engine(f"  ║      {log.dim(extra)}"))

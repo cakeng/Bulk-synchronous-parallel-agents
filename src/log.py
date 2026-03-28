@@ -69,20 +69,12 @@ def _print_block_lines(color_fn, prefix: str, key: str, value_str: str) -> None:
         print(color_fn(f"  │    {extra}"))
 
 
-def print_agent_input(agent_id: int, state: dict, full: bool = False) -> None:
-    """Print the agent's variable dict before operator execution (blue)."""
-    tag = bold(f"[Agent {agent_id}]")
-    print(verbose_in(f"  ┌─ {tag} INPUT STATE ─────────────────────────────"))
-    for k, v in state.items():
-        _print_block_lines(verbose_in, "  │  ", k, format_value(v, full=full))
-    print(verbose_in(f"  └─────────────────────────────────────────────────"))
-
 
 def print_agent_output_diff(
-    agent_id: int, before: dict, after: dict, full: bool = False
+    agent_rank: int, before: dict, after: dict, full: bool = False
 ) -> None:
     """Print new/changed variables after operator execution (magenta)."""
-    tag = bold(f"[Agent {agent_id}]")
+    tag = bold(f"[Agent {agent_rank}]")
     new_keys     = [k for k in after if k not in before]
     changed_keys = [k for k in after if k in before and after[k] != before[k]]
 
@@ -107,3 +99,35 @@ def print_agent_output_diff(
     for k in new_keys:
         _print_block_lines(verbose_out, "  │  ", f"+ {k}", format_value(after[k], full=full))
     print(verbose_out(f"  └─────────────────────────────────────────────────"))
+
+
+# Teal / cyan-green for engine-global diffs
+_TEAL = "\033[96m"
+
+def _globals_line(msg: str) -> str:
+    return _c(_TEAL, msg)
+
+def print_globals_diff(before: dict, after: dict, full: bool = False) -> None:
+    """Print changes to engine_globals made by an agent (teal)."""
+    new_keys     = [k for k in after if k not in before]
+    changed_keys = [k for k in after if k in before and after[k] != before[k]]
+
+    if not new_keys and not changed_keys:
+        return
+
+    print(_globals_line(f"  ┌─ {bold('engine_globals')} CHANGES ────────────────────────"))
+    for k in changed_keys:
+        before_str = format_value(before[k], full=full)
+        after_str  = format_value(after[k],  full=full)
+        if "\n" in before_str or "\n" in after_str:
+            print(_globals_line(f"  │  ~ {bold(k)} (before):"))
+            for line in before_str.splitlines():
+                print(_globals_line(f"  │      {line}"))
+            print(_globals_line(f"  │    (after):"))
+            for line in after_str.splitlines():
+                print(_globals_line(f"  │      {line}"))
+        else:
+            print(_globals_line(f"  │  ~ {bold(k)}: {before_str}  →  {after_str}"))
+    for k in new_keys:
+        _print_block_lines(_globals_line, "  │  ", f"+ {k}", format_value(after[k], full=full))
+    print(_globals_line(f"  └─────────────────────────────────────────────────"))

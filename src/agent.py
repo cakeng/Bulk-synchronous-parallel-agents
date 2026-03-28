@@ -1,9 +1,26 @@
 from __future__ import annotations
+import base64
+import hashlib
+import pickle as _pickle
 from typing import Any, Dict, List, Optional
 from openai import AsyncOpenAI
 
 
-# Default LLM server config (matches vllm_config.yaml)
+def compute_unique_id(state: dict) -> str:
+    """Compute a stable 8-char base64 ID for an agent state (sha256, last 8 chars).
+
+    The key ``unique_id`` itself is excluded from the hash to avoid circularity.
+    """
+    state_for_hash = {k: v for k, v in state.items() if k != "unique_id"}
+    try:
+        raw = _pickle.dumps(state_for_hash, protocol=4)
+    except Exception:
+        raw = repr(sorted(state_for_hash.items())).encode()
+    digest = hashlib.sha256(raw).digest()
+    return base64.b64encode(digest).decode()[-8:]
+
+
+# Default LLM server config (matches vllm_state.yaml)
 DEFAULT_LLM_CONFIG: Dict[str, Any] = {
     "base_url": "http://127.0.0.1:18000/v1",
     "api_key": "12f34rtfq34er234T34GARW5G",
@@ -15,26 +32,30 @@ class Agent:
     """Single agent with an isolated variable dictionary.
 
     Variables are accessed and set via dict-style syntax:
-        history = agent["chat_history"]
+        context = agent["llm_state"]["context"]
         agent["result"] = "some value"
 
     Or attribute-style (for convenience):
-        history = agent.chat_history
+        context = agent.llm_state["context"]
         agent.result = "some value"
 
     Built-in keys always present:
-        agent_id    : int  — unique id assigned by the engine
-        llm_config  : dict — connection info for the LLM server
-        chat_history: list — list of {"role": ..., "content": ...} dicts
+        agent_rank: int  — rank (position) assigned by the engine
+        llm_state : dict — LLM connection info and chat context; built-in keys:
+            base_url : str  — vLLM server URL
+            api_key  : str  — API key
+            model    : str  — model name
+            context  : list — list of {"role": ..., "content": ...} dicts
     """
 
-    def __init__(self, agent_id: int, llm_config: Optional[Dict[str, Any]] = None):
+    def __init__(self, agent_rank: int, llm_state: Optional[Dict[str, Any]] = None):
         # Store everything in a flat dict; access via __getitem__/__setitem__
-        object.__setattr__(self, "_vars", {
-            "agent_id": agent_id,
-            "llm_config": {**DEFAULT_LLM_CONFIG, **(llm_config or {})},
-            "chat_history": [],
-        })
+        d: Dict[str, Any] = {
+            "agent_rank": agent_rank,
+            "llm_state": {"context": [], **DEFAULT_LLM_CONFIG, **(llm_state or {})},
+        }
+        d["unique_id"] = compute_unique_id(d)
+        object.__setattr__(self, "_vars", d)
 
     # ------------------------------------------------------------------
     # Dict-style access
@@ -108,7 +129,7 @@ class Agent:
 
         Args:
             messages: List of {"role": ..., "content": ...} dicts.
-                      Defaults to the agent's current chat_history.
+                      Defaults to the agent's current context.
             **kwargs: Extra arguments forwarded to
                       AsyncOpenAI.chat.completions.create()
                       (e.g. temperature, max_tokens, stream, …).
@@ -116,9 +137,9 @@ class Agent:
         Returns:
             openai.types.chat.ChatCompletion response object.
         """
-        cfg = self._vars["llm_config"]
+        cfg = self._vars["llm_state"]
         if messages is None:
-            messages = self._vars["chat_history"]
+            messages = cfg["context"]
 
         client = AsyncOpenAI(
             base_url=cfg["base_url"],
@@ -133,4 +154,4 @@ class Agent:
         return response
 
     def __repr__(self) -> str:
-        return f"Agent(id={self._vars.get('agent_id')}, vars={list(self._vars.keys())})"
+        return f"Agent(rank={self._vars.get('agent_rank')}, vars={list(self._vars.keys())})"
