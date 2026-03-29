@@ -1,0 +1,6 @@
+fastapi>=0.135.2
+uvicorn>=0.42.0
+python-multipart>=0.0.22
+websockets>=16.0
+openai>=2.30.0
+psutil>=7.2.2

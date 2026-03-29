@@ -78,6 +78,7 @@ class Engine:
         *,
         verbose: int = 0,
         debug: bool = False,
+        ui_callback=None,   # async callable(event: dict) | None
     ) -> None:
         self.globals["step"] = self.globals.get("step", 0) + 1
         self.globals["agent_size"] = len(self.agents)
@@ -91,18 +92,25 @@ class Engine:
             f"'{Path(operator_path).name}' on {len(self.agents)} agent(s)  [{mode}]"
         )
 
+        # Notify UI that agents are starting
+        if ui_callback:
+            for agent in self.agents:
+                await ui_callback({"type": "agent_started", "agent_rank": agent["agent_rank"]})
+
         if debug:
             results = []
             for agent in self.agents:
                 result = await self._run_agent_subprocess(
-                    agent, operator_path, engine_vars=engine_vars, verbose=verbose
+                    agent, operator_path, engine_vars=engine_vars,
+                    verbose=verbose, ui_callback=ui_callback,
                 )
                 results.append(result)
         else:
             tasks = [
                 asyncio.create_task(
                     self._run_agent_subprocess(
-                        agent, operator_path, engine_vars=engine_vars, verbose=verbose
+                        agent, operator_path, engine_vars=engine_vars,
+                        verbose=verbose, ui_callback=ui_callback,
                     )
                 )
                 for agent in self.agents
@@ -142,6 +150,14 @@ class Engine:
             f"({len(self.agents)} agent(s) active)"
         )
 
+        # Notify UI with final agent list after all post-processing
+        if ui_callback:
+            await ui_callback({
+                "type": "post_processing_done",
+                "agents": [a.get_state() for a in self.agents],
+                "globals": dict(self.globals),
+            })
+
     # ------------------------------------------------------------------
     # Subprocess dispatch
     # ------------------------------------------------------------------
@@ -153,6 +169,7 @@ class Engine:
         *,
         engine_vars: Dict[str, Any],
         verbose: int = 0,
+        ui_callback=None,
     ) -> dict:
         """Returns the raw worker output dict:
         {"state": ..., "return_value": ..., "operator_type": ...}
@@ -182,16 +199,39 @@ class Engine:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=project_root,
             )
-            stdout, stderr = await proc.communicate()
 
-            if stdout:
-                for line in stdout.decode().splitlines():
+            stderr_lines: list[str] = []
+
+            async def _stream_stdout() -> None:
+                assert proc.stdout
+                async for raw in proc.stdout:
+                    line = raw.decode().rstrip()
                     log.print_agent_out(prefix, line)
-            if stderr:
-                for line in stderr.decode().splitlines():
+                    if ui_callback:
+                        await ui_callback({"type": "agent_log", "agent_rank": agent_rank, "stream": "stdout", "text": line})
+
+            async def _stream_stderr() -> None:
+                assert proc.stderr
+                async for raw in proc.stderr:
+                    line = raw.decode().rstrip()
+                    stderr_lines.append(line)
                     log.print_agent_err(prefix, line)
+                    if ui_callback:
+                        await ui_callback({"type": "agent_log", "agent_rank": agent_rank, "stream": "stderr", "text": line})
+
+            await asyncio.gather(_stream_stdout(), _stream_stderr())
+            await proc.wait()
 
             if proc.returncode != 0:
+                error_text = "\n".join(stderr_lines).strip()
+                if not error_text:
+                    error_text = f"Worker for agent {agent_rank} exited with code {proc.returncode}"
+                if ui_callback:
+                    await ui_callback({
+                        "type": "agent_failed",
+                        "agent_rank": agent_rank,
+                        "error": error_text,
+                    })
                 raise RuntimeError(
                     log.error(
                         f"Worker for agent {agent_rank} exited with code "
@@ -201,6 +241,18 @@ class Engine:
 
             with open(output_path, "rb") as fh:
                 worker_output: dict = pickle.load(fh)
+
+            # Notify UI that this agent finished
+            if ui_callback:
+                slim_state = {
+                    k: v for k, v in worker_output["state"].items()
+                    if k not in _ENGINE_KEYS
+                }
+                await ui_callback({
+                    "type": "agent_completed",
+                    "agent_rank": agent_rank,
+                    "state": slim_state,
+                })
 
         finally:
             for p in (input_path, output_path):

@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BSA Framework</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- ── Top bar ── -->
+  <div id="top-bar">
+    <!-- Menu -->
+    <div class="menu-wrapper">
+      <button class="menu-btn" id="menu-btn">☰</button>
+      <div class="dropdown" id="menu-dropdown">
+        <div class="dropdown-item" id="menu-create">Create Run…</div>
+        <div class="dropdown-item" id="menu-clear">Clear Run…</div>
+        <div class="dropdown-item" id="menu-delete">Delete Run…</div>
+      </div>
+    </div>
+    <!-- Tabs -->
+    <div id="tabs"></div>
+  </div>
+
+  <!-- ── Middle row ── -->
+  <div id="middle">
+
+    <!-- Left/Center: tree view (width resizable) -->
+    <div class="panel" id="tree-panel">
+      <div class="panel-header">
+        Execution Tree
+        <button id="delete-states-btn">Delete Step</button>
+      </div>
+      <div class="panel-body" id="tree-body">
+        <div id="tree-svg-container">
+          <svg id="tree-svg"></svg>
+        </div>
+      </div>
+    </div>
+
+    <div id="middle-resizer"></div>
+
+    <!-- Right: operator editor -->
+    <div class="panel" id="editor-panel">
+      <div class="panel-header">
+        <span>Operators</span>
+        <div class="editor-toolbar">
+          <div style="position:relative">
+            <button id="btn-new-op">+ New ▾</button>
+            <div class="dropdown" id="new-op-dropdown">
+              <div class="dropdown-item" data-op-type="base">Base</div>
+              <div class="dropdown-item" data-op-type="fork">Fork</div>
+              <div class="dropdown-item" data-op-type="kill">Kill</div>
+              <div class="dropdown-item" data-op-type="sort">Sort</div>
+              <div class="dropdown-item" data-op-type="shuffle">Shuffle</div>
+            </div>
+          </div>
+          <button id="btn-copy-op">Copy</button>
+          <button id="btn-paste-op">Paste</button>
+          <button id="btn-delete-op-cell">Delete</button>
+          <button class="run-all-btn" id="btn-run-all">▶ Run All</button>
+        </div>
+      </div>
+      <div id="op-cells"></div>
+    </div>
+
+  </div>
+
+  <!-- ── Bottom row ── -->
+  <div id="bottom">
+
+    <!-- Engine state -->
+    <div class="panel">
+      <div class="panel-header">Engine State</div>
+      <div class="bottom-panel" id="engine-state-panel">
+        <h4>Engine Globals</h4>
+        <table class="globals-table" id="globals-table"></table>
+        <h4 style="margin-top:8px">Operator Code</h4>
+        <pre id="op-code-display" style="font-size:11px;color:#ce9178;white-space:pre-wrap;overflow:auto;max-height:80px;background:#1a1a1a;padding:4px;border-radius:3px"></pre>
+      </div>
+    </div>
+
+    <!-- Agent state -->
+    <div class="panel">
+      <div class="panel-header">Agent State</div>
+      <div class="bottom-panel" id="agent-state-panel">
+        <h4>Local Variables</h4>
+        <table class="agent-vars-table" id="agent-vars-table"></table>
+      </div>
+    </div>
+
+    <!-- Chat context -->
+    <div class="panel">
+      <div class="panel-header">Chat Context</div>
+      <div class="bottom-panel" id="chat-panel">
+        <div id="chat-context"></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Dialogs -->
+<dialog id="dlg-create-run">
+  <h3>Create New Run</h3>
+  <label>Run name</label>
+  <input id="dlg-create-run-name" type="text" placeholder="my_experiment">
+  <div class="dialog-btns">
+    <button onclick="document.getElementById('dlg-create-run').close()">Cancel</button>
+    <button class="primary" id="dlg-create-run-ok">Create</button>
+  </div>
+</dialog>
+
+<dialog id="dlg-confirm-clear">
+  <h3>Clear Run</h3>
+  <p id="dlg-clear-msg" style="margin-bottom:14px;color:#aaa"></p>
+  <div class="dialog-btns">
+    <button onclick="document.getElementById('dlg-confirm-clear').close()">Cancel</button>
+    <button class="danger" id="dlg-clear-ok">Clear</button>
+  </div>
+</dialog>
+
+<dialog id="dlg-confirm-delete">
+  <h3>Delete Run</h3>
+  <p id="dlg-delete-msg" style="margin-bottom:14px;color:#aaa"></p>
+  <div class="dialog-btns">
+    <button onclick="document.getElementById('dlg-confirm-delete').close()">Cancel</button>
+    <button class="danger" id="dlg-delete-ok">Delete</button>
+  </div>
+</dialog>
+
+<dialog id="dlg-agent-log">
+  <h3 id="dlg-agent-log-title">Agent Output</h3>
+  <pre id="dlg-agent-log-text" style="white-space:pre-wrap;overflow:auto;width:560px;max-height:380px;font-size:11px;background:#111;padding:8px;border-radius:4px;margin-bottom:14px;line-height:1.5"></pre>
+  <div class="dialog-btns">
+    <button onclick="document.getElementById('dlg-agent-log').close()">Close</button>
+  </div>
+</dialog>
+
+<dialog id="dlg-copy-op">
+  <h3>Copy Operator</h3>
+  <label>New file name</label>
+  <input id="dlg-copy-op-name" type="text" placeholder="my_step_copy.py">
+  <div class="dialog-btns">
+    <button onclick="document.getElementById('dlg-copy-op').close()">Cancel</button>
+    <button class="primary" id="dlg-copy-op-ok">Copy</button>
+  </div>
+</dialog>
+
+<!-- Monaco Editor via CDN -->
+<script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.47.0/min/vs/loader.js"></script>
+<script>
+  require.config({ paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.47.0/min/vs' } });
+  window.monacoReady = new Promise(resolve => require(['vs/editor/editor.main'], resolve));
+</script>
+
+<script src="tree.js"></script>
+<script src="operator_panel.js"></script>
+<script src="bottom_panels.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

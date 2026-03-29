@@ -28,6 +28,7 @@ Each invocation corresponds to one "cell" in the notebook-style execution model:
 """
 import argparse
 import asyncio
+import json
 import os
 import sys
 from pathlib import Path
@@ -89,6 +90,11 @@ async def main() -> None:
         action="store_true",
         help="Run agents serially (one at a time) instead of concurrently.",
     )
+    parser.add_argument(
+        "--ui-output",
+        action="store_true",
+        help="Emit JSON events to stdout for the UI server to consume.",
+    )
     args = parser.parse_args()
 
     if args.debug:
@@ -109,10 +115,17 @@ async def main() -> None:
     if args.verbose:
         _print_engine_overview(engine, run_name=args.run, verbose_level=args.verbose)
 
+    # Build UI callback if --ui-output is set
+    ui_callback = None
+    if args.ui_output:
+        async def ui_callback(event: dict) -> None:  # type: ignore[misc]
+            print(json.dumps(event), flush=True)
+
     await engine.run_operator(
         str(op_path),
         verbose=args.verbose,
         debug=args.debug,
+        ui_callback=ui_callback,
     )
 
     if args.verbose:
