@@ -17,7 +17,7 @@ class ExampleKill(KillOperator):
         parsed, raw, thinking, tool_calls, tokens = await run_agent(
             user_input    = f"What is the {_local['agent_rank'] + 1}th largest state in the United States?",
             output_config = {"answer": str, "explanation": str},
-            agent_config  = _local["llm_state"],
+            agent_state   = _local,
         )
         state = parsed["answer"]
         state_int = self.char_to_int(state[0])

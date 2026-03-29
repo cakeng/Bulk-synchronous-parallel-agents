@@ -5,7 +5,10 @@ const BottomPanels = (() => {
   let _runName = null;
   let _records = [];       // engine state summaries
   let _curFull = null;     // full engine state (globals + full_agents)
+  let _lastAgent = null;   // last agent dict passed to renderAgent (for toggle re-render)
   let _selectedAgent = 0;
+  let _showThinking  = false;
+  let _showToolCalls = false;
 
   const VAL_MAX = 16; // max chars to show inline for a variable value
 
@@ -40,10 +43,11 @@ const BottomPanels = (() => {
   }
 
   function renderAgent(agent) {
+    _lastAgent = agent;
     const tbl = document.getElementById('agent-vars-table');
     tbl.innerHTML = '';
     for (const [k, v] of Object.entries(agent)) {
-      if (k === 'llm_state') continue;
+      if (k === 'agent_config') continue;
       const tr = document.createElement('tr');
       const valStr = JSON.stringify(v);
       const short = valStr.length <= VAL_MAX;
@@ -58,26 +62,99 @@ const BottomPanels = (() => {
       }
       tbl.appendChild(tr);
     }
-    renderChat(agent.llm_state?.context || []);
+    renderChat(agent.agent_config?.context || [], agent.agent_config?.call_log || []);
   }
 
-  function renderChat(messages) {
+  function renderChat(messages, callLog) {
     const container = document.getElementById('chat-context');
     const panel     = document.getElementById('chat-panel');
     container.innerHTML = '';
-    messages.forEach(msg => {
-      const div = document.createElement('div');
-      div.className = `chat-msg ${msg.role}`;
-      const roleLabel = document.createElement('div');
-      roleLabel.className = 'chat-msg-role';
-      roleLabel.textContent = msg.role;
-      div.appendChild(roleLabel);
-      const content = document.createElement('div');
-      content.textContent = (msg.content || '').trim();
-      div.appendChild(content);
-      container.appendChild(div);
+
+    // The agentic loop injects intermediate assistant messages (one per tool-call
+    // round) into the context, but call_log has ONE entry per run_agent() call
+    // (aggregating all inner rounds).  We attach thinking/tool-calls to the LAST
+    // assistant message in each run_agent sequence — the one that has text content.
+    // Pre-scan: for each assistant message index, decide which call_log entry it
+    // maps to.  Strategy: find groups of [asst(tool), tool-result, …, asst(text)]
+    // and assign the call_log entry only to the last assistant in each group.
+    const assistantIndices = messages
+      .map((m, i) => m.role === 'assistant' ? i : -1)
+      .filter(i => i >= 0);
+
+    // Map from message index → call_log index (-1 = none)
+    const callLogMap = new Map();
+    let callIdx = 0;
+    let groupStart = 0;
+    while (groupStart < assistantIndices.length) {
+      // Walk forward while messages are intermediate (no text content)
+      let groupEnd = groupStart;
+      while (
+        groupEnd + 1 < assistantIndices.length &&
+        !(messages[assistantIndices[groupEnd]].content || '').trim()
+      ) {
+        groupEnd++;
+      }
+      // assistantIndices[groupEnd] is the last (or only) assistant in this group
+      callLogMap.set(assistantIndices[groupEnd], callIdx);
+      callIdx++;
+      groupStart = groupEnd + 1;
+    }
+
+    messages.forEach((msg, msgIdx) => {
+      // Tool response messages — only shown when showToolCalls is on
+      if (msg.role === 'tool') {
+        if (_showToolCalls) {
+          container.appendChild(_makeBubble('tool-result', 'tool result', msg.content || ''));
+        }
+        return;
+      }
+
+      if (msg.role === 'assistant') {
+        const logIdx = callLogMap.has(msgIdx) ? callLogMap.get(msgIdx) : -1;
+        const entry  = logIdx >= 0 ? (callLog[logIdx] || null) : null;
+
+        // Thinking bubbles — before the assistant reply
+        if (_showThinking && entry && entry.thinking && entry.thinking.length > 0) {
+          for (const thought of entry.thinking) {
+            container.appendChild(_makeBubble('thinking', 'thinking', thought));
+          }
+        }
+
+        // Tool call bubbles — before the assistant reply (LLM decided to call tools)
+        if (_showToolCalls && entry && entry.tool_calls && entry.tool_calls.length > 0) {
+          for (const tc of entry.tool_calls) {
+            const name = tc.function?.name || tc.id || 'tool_call';
+            const args = tc.function?.arguments || '';
+            container.appendChild(_makeBubble('tool-call', `tool call: ${name}`, args));
+          }
+        }
+
+        // The assistant message itself (skip empty tool-call intermediaries)
+        const hasContent = (msg.content || '').trim();
+        if (hasContent) {
+          container.appendChild(_makeBubble('assistant', 'assistant', msg.content));
+        }
+        return;
+      }
+
+      // User / system messages
+      container.appendChild(_makeBubble(msg.role, msg.role, msg.content || ''));
     });
+
     requestAnimationFrame(() => { panel.scrollTop = panel.scrollHeight; });
+  }
+
+  function _makeBubble(cssClass, roleLabel, content) {
+    const div = document.createElement('div');
+    div.className = `chat-msg ${cssClass}`;
+    const roleEl = document.createElement('div');
+    roleEl.className = 'chat-msg-role';
+    roleEl.textContent = roleLabel;
+    div.appendChild(roleEl);
+    const contentEl = document.createElement('div');
+    contentEl.textContent = String(content).trim();
+    div.appendChild(contentEl);
+    return div;
   }
 
   function escHtml(s) {
@@ -90,6 +167,21 @@ const BottomPanels = (() => {
     document.getElementById('chat-context').innerHTML = '';
     document.getElementById('op-code-display').textContent = '';
   }
+
+  // ── Toggle button wiring ─────────────────────────────────────────────────
+  function _wireToggle(btnId, getter, setter) {
+    const btn = document.getElementById(btnId);
+    if (!btn) return;
+    btn.addEventListener('click', () => {
+      setter(!getter());
+      btn.classList.toggle('active', getter());
+      if (_curFull) renderAgentState();
+      else if (_lastAgent) renderAgent(_lastAgent);
+    });
+  }
+
+  _wireToggle('btn-show-thinking',  () => _showThinking,  v => { _showThinking  = v; });
+  _wireToggle('btn-show-tool-calls',() => _showToolCalls, v => { _showToolCalls = v; });
 
   // ── Public API ────────────────────────────────────────────────────────────
   return {

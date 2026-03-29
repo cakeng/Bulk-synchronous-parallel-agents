@@ -96,6 +96,19 @@ async def kill_current(run_name: str) -> None:
 # Internal
 # ---------------------------------------------------------------------------
 
+# Event types that should be buffered in step_log for reconnect replay.
+# Keep the per-agent lifecycle events (small in number) but exclude
+# agent_log (can be thousands of lines) and agent_completed (large state
+# payload) to avoid flooding the client on WS reconnect, which would
+# starve Monaco's cursor blink animation of animation frames.
+_LOG_TYPES = frozenset({
+    "step_started",
+    "agent_started",
+    "agent_failed",
+    "step_failed",
+})
+
+
 async def _emit_queue(run_name: str) -> None:
     run = state_manager.get_run(run_name)
     await broadcast(run_name, {
@@ -103,6 +116,14 @@ async def _emit_queue(run_name: str) -> None:
         "run": run_name,
         "queue": list(run.queue),
     })
+
+
+async def _broadcast_and_log(run_name: str, event: dict) -> None:
+    """Broadcast an event and, if it's a step-lifecycle event, buffer it for reconnect."""
+    if event.get("type") in _LOG_TYPES:
+        run = state_manager.get_run(run_name)
+        run.step_log.append(event)
+    await broadcast(run_name, event)
 
 
 async def _drain_loop(run_name: str) -> None:
@@ -119,6 +140,8 @@ async def _drain_loop(run_name: str) -> None:
 async def _run_one(run_name: str, operator_name: str) -> None:
     run = state_manager.get_run(run_name)
     run.running_operator = operator_name
+    run.step_log = []    # clear previous step log
+    run.agent_logs = {}  # clear previous agent logs
 
     op_path = RUNS_DIR / run_name / "operators" / operator_name
     operator_code = op_path.read_text() if op_path.exists() else ""
@@ -131,7 +154,7 @@ async def _run_one(run_name: str, operator_name: str) -> None:
     if run.engine_state_list:
         pre_agents = list(run.engine_state_list[-1].post_agents)
 
-    await broadcast(run_name, {
+    await _broadcast_and_log(run_name, {
         "type": "step_started",
         "run": run_name,
         "operator_name": operator_name,
@@ -149,11 +172,13 @@ async def _run_one(run_name: str, operator_name: str) -> None:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=project_root,
+            limit=16 * 1024 * 1024,  # 16 MB — step_engine re-encodes worker events, so budget is larger
         )
         run.running_pid = proc.pid
 
         post_agents: list[dict] = []
         engine_globals: dict = {}
+        proc_stderr_lines: list[str] = []
 
         async def read_stdout() -> None:
             nonlocal post_agents, engine_globals
@@ -166,7 +191,20 @@ async def _run_one(run_name: str, operator_name: str) -> None:
                     if event.get("type") == "post_processing_done":
                         post_agents = event.pop("agents", [])
                         engine_globals = event.pop("globals", {})
-                    await broadcast(run_name, event)
+                    # Store agent_log and agent_status lines server-side for replay
+                    evt_type = event.get("type")
+                    rank = event.get("agent_rank")
+                    if rank is not None:
+                        if evt_type == "agent_log":
+                            stream = event.get("stream", "stdout")
+                            text   = event.get("text", "")
+                            prefix = "" if stream == "stdout" else "[stderr] "
+                            run.agent_logs.setdefault(rank, []).append(prefix + text)
+                        elif evt_type == "agent_status":
+                            status = event.get("status", "")
+                            if status:
+                                run.agent_logs.setdefault(rank, []).append(f"[status] {status}")
+                    await _broadcast_and_log(run_name, event)
                 except json.JSONDecodeError:
                     await broadcast(run_name, {"type": "log_line", "run": run_name, "text": line})
 
@@ -175,7 +213,14 @@ async def _run_one(run_name: str, operator_name: str) -> None:
             async for raw in proc.stderr:
                 line = raw.decode().rstrip()
                 if line:
-                    await broadcast(run_name, {"type": "log_line", "run": run_name, "text": f"[ERR] {line}"})
+                    proc_stderr_lines.append(line)
+                    # Broadcast live to all agents currently known to be running
+                    ranks = list(run.agent_logs.keys()) or [0]
+                    for rank in ranks:
+                        await broadcast(run_name, {
+                            "type": "agent_log", "run": run_name,
+                            "agent_rank": rank, "stream": "stderr", "text": line,
+                        })
 
         await asyncio.gather(read_stdout(), read_stderr())
         await proc.wait()
@@ -194,6 +239,7 @@ async def _run_one(run_name: str, operator_name: str) -> None:
                 post_agents=post_agents,
                 engine_globals=engine_globals,
             )
+            run.step_log = []  # clear so reconnecting clients don't see phantom "running"
             await broadcast(run_name, {
                 "type": "step_completed",
                 "run": run_name,
@@ -203,17 +249,27 @@ async def _run_one(run_name: str, operator_name: str) -> None:
                 "record": state_manager.record_to_summary(record),
             })
         elif proc.returncode != 0:
-            await broadcast(run_name, {
+            # Persist proc-level stderr into every agent's log buffer for replay.
+            # (They were already broadcast live in read_stderr above.)
+            if proc_stderr_lines:
+                ranks = list(run.agent_logs.keys()) or [0]
+                for rank in ranks:
+                    buf = run.agent_logs.setdefault(rank, [])
+                    buf.append("[stderr] --- process stderr ---")
+                    buf.extend(f"[stderr] {l}" for l in proc_stderr_lines)
+            error_text = "\n".join(proc_stderr_lines).strip() if proc_stderr_lines \
+                else f"Process exited with code {proc.returncode}"
+            await _broadcast_and_log(run_name, {
                 "type": "step_failed",
                 "run": run_name,
                 "operator_name": operator_name,
-                "error": f"Process exited with code {proc.returncode}",
+                "error": error_text,
             })
 
     except Exception as exc:
         run.running_pid = None
         run.running_operator = None
-        await broadcast(run_name, {
+        await _broadcast_and_log(run_name, {
             "type": "step_failed",
             "run": run_name,
             "operator_name": operator_name,

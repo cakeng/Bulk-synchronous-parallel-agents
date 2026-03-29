@@ -11,10 +11,13 @@ const Tree = (() => {
   let _inProgress = {};
   let _pendingAgents = new Set();
   let _failedAgents = {};   // agent_rank -> error string
+  let _agentStatus  = {};   // agent_rank -> status string (live, in-progress only)
   let _agentLogs = {};      // agent_rank -> string[] (accumulated lines)
   let _logDialogRank = null; // which agent's log is currently shown
   let _pendingStepNum = null;
   let _pendingOpName  = null;
+  let _stepFailed     = false;
+  let _queue = [];          // queued operator names (not yet started)
   let _selectedUid = null;
   let _selectedAgent = null;
   let _onSelect = null;
@@ -34,14 +37,37 @@ const Tree = (() => {
     for (const rec of _records) {
       rows.push({ uid: rec.uid, opName: rec.operator_name, opType: rec.operator_type || 'base', agents: rec.post_agents, stepNum: rec.step_num });
     }
-    if (_pendingAgents.size > 0 || Object.keys(_failedAgents).length > 0) {
+    if (_pendingAgents.size > 0 || Object.keys(_failedAgents).length > 0 || _pendingOpName !== null) {
       const prevAgents = rows.length > 0 ? rows[rows.length - 1].agents : [];
-      const inProgAgents = prevAgents.map(a => {
+      // For the first step, prevAgents is empty; synthesise the list from
+      // whatever ranks we've seen via agent_started / agent_completed / agent_failed.
+      const effectiveAgents = prevAgents.length > 0 ? prevAgents : (() => {
+        const seen = new Set([
+          ..._pendingAgents,
+          ...Object.keys(_inProgress).map(Number),
+          ...Object.keys(_failedAgents).map(Number),
+        ]);
+        return [...seen].sort((a, b) => a - b).map(rank => ({ agent_rank: rank }));
+      })();
+      const inProgAgents = effectiveAgents.map(a => {
         if (_failedAgents[a.agent_rank] !== undefined)
           return { ...a, _status: 'failed', _error: _failedAgents[a.agent_rank] };
         return { ...a, _status: _inProgress[a.agent_rank] ? 'done' : 'running' };
       });
-      rows.push({ uid: null, opName: _pendingOpName || '…running…', opType: '', agents: inProgAgents, inProgress: true, stepNum: _pendingStepNum });
+      rows.push({
+        uid: null, opName: _pendingOpName || (_stepFailed ? '…failed…' : '…running…'),
+        opType: '', agents: inProgAgents,
+        inProgress: !_stepFailed, stepFailed: _stepFailed,
+        stepNum: _pendingStepNum,
+      });
+    }
+    // Queued rows — placeholder, agents inherited from last row
+    if (_queue.length > 0) {
+      const lastAgents = rows.length > 0 ? rows[rows.length - 1].agents : [];
+      const queuedAgents = lastAgents.map(a => ({ ...a, _status: 'queued' }));
+      for (const opName of _queue) {
+        rows.push({ uid: null, opName, opType: '', agents: queuedAgents, queued: true, stepNum: null });
+      }
     }
     return rows;
   }
@@ -67,32 +93,50 @@ const Tree = (() => {
     const cx = nodeCx(agent.agent_rank);
     const cy = nodeCy(rowIdx);
 
-    const g = svgEl('g', { class: 'tree-node', 'data-uid': uid || '', 'data-rank': agent.agent_rank, ...(inProgress ? { cursor: 'pointer' } : {}) }, svg);
+    const g = svgEl('g', { class: 'tree-node', 'data-uid': uid || '', 'data-rank': agent.agent_rank, cursor: 'pointer' }, svg);
     if (agent._status === 'failed') g.classList.add('agent-failed');
     else if (agent._status === 'running') g.classList.add('running-pending');
+    else if (agent._status === 'queued') g.classList.add('queued');
     else if (inProgress && agent._status === 'done') g.classList.add('running');
 
     if (uid === _selectedUid && agent.agent_rank === _selectedAgent) g.classList.add('selected');
     if (uid === _selectedUid && _selectedAgent === null) g.classList.add('selected');
 
+    const status = (agent._status === 'running' || agent._status === 'done')
+      ? (_agentStatus[agent.agent_rank] || null) : null;
+
     svgEl('rect', { x, y, width: NODE_W, height: NODE_H, rx: 4 }, g);
 
-    svgEl('text', { x: cx, y: y + NODE_H / 2 - 6, 'text-anchor': 'middle', 'font-size': 12, fill: '#9cdcfe' }, g)
+    const nameY = status ? y + 11 : y + NODE_H / 2 - 6;
+    svgEl('text', { x: cx, y: nameY, 'text-anchor': 'middle', 'font-size': 12, fill: '#9cdcfe' }, g)
       .textContent = `Agent ${agent.agent_rank}`;
 
     const uid8 = (agent.unique_id || '').slice(-8);
-    svgEl('text', { x: cx, y: y + NODE_H / 2 + 9, 'text-anchor': 'middle', 'font-size': 10, fill: '#666' }, g)
+    const uidY = status ? y + 23 : y + NODE_H / 2 + 9;
+    svgEl('text', { x: cx, y: uidY, 'text-anchor': 'middle', 'font-size': 10, fill: '#666' }, g)
       .textContent = uid8;
 
-    g.addEventListener('click', () => {
-      if (inProgress) {
-        _openLogDialog(agent.agent_rank);
-        return;
-      }
+    if (status) {
+      const maxLen = 17;
+      const label  = status.length > maxLen ? status.slice(0, maxLen - 1) + '…' : status;
+      svgEl('text', { x: cx, y: y + 36, 'text-anchor': 'middle', 'font-size': 9, fill: '#6a9f6a' }, g)
+        .textContent = label;
+    }
+
+    // Single-click: select completed agents; no-op for in-progress/failed/queued
+    g.addEventListener('click', e => {
+      if (e.detail > 1) return;  // ignore clicks that are part of a dblclick
+      if (inProgress || agent._status === 'failed' || agent._status === 'queued') return;
       _selectedUid = uid;
       _selectedAgent = agent.agent_rank;
       render();
       if (_onSelect) _onSelect(uid, agent.agent_rank);
+    });
+
+    // Double-click: open output log for any agent
+    g.addEventListener('dblclick', e => {
+      e.stopPropagation();
+      _openLogDialog(agent.agent_rank);
     });
 
     return { cx, cy };
@@ -105,8 +149,24 @@ const Tree = (() => {
     const title = document.getElementById('dlg-agent-log-title');
     const pre   = document.getElementById('dlg-agent-log-text');
     title.textContent = `Agent ${rank} — Output`;
+
     const lines = _agentLogs[rank] || [];
-    pre.innerHTML = lines.map(l => _formatLogLine(l)).join('\n');
+    const err   = _failedAgents[rank];
+    const stepErrAlreadyInLog = lines.some(l => l.includes('--- step failed ---'));
+    if (lines.length > 0) {
+      // Show captured stdout/stderr; append error only if not already written by onStepFailed
+      let html = lines.map(l => _formatLogLine(l)).join('\n');
+      if (err && !stepErrAlreadyInLog && err !== 'Agent did not complete (step failed).') {
+        html += '\n' + err.split('\n').map(l => _formatLogLine('[stderr] ' + l)).join('\n');
+      }
+      pre.innerHTML = html;
+    } else if (err && err !== 'Agent did not complete (step failed).') {
+      // Fallback: show the error text captured in agent_failed (survives tab-switch replay)
+      pre.innerHTML = err.split('\n').map(l => _formatLogLine('[stderr] ' + l)).join('\n');
+    } else {
+      pre.innerHTML = '<span style="color:#555;font-style:italic">No output captured for this agent.</span>';
+    }
+
     pre.scrollTop = pre.scrollHeight;
     dlg.onclose = () => { _logDialogRank = null; };
     if (!dlg.open) dlg.showModal();
@@ -114,7 +174,11 @@ const Tree = (() => {
 
   function _formatLogLine(line) {
     const esc = line.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-    if (line.startsWith('[stderr]')) return `<span style="color:#f44747">${esc}</span>`;
+    if (line.startsWith('[stderr]'))  return `<span style="color:#f44747">${esc}</span>`;
+    if (line.startsWith('[status]'))  return `<span style="color:#6a9f6a">${esc}</span>`;
+    if (line.startsWith('[tool]'))    return `<span style="color:#ce9178">${esc}</span>`;
+    if (line.startsWith('[tool result]')) return `<span style="color:#4ec9b0">${esc}</span>`;
+    if (line.startsWith('[LLM call')) return `<span style="color:#569cd6">${esc}</span>`;
     return `<span style="color:#ccc">${esc}</span>`;
   }
 
@@ -275,9 +339,9 @@ const Tree = (() => {
 
       const g = svgEl('g', { cursor: rowUid ? 'pointer' : 'default' }, svg);
 
-      const btnFill   = isSelected ? '#1e3a5c' : row.inProgress ? '#152515' : '#252526';
-      const btnStroke = isSelected ? '#569cd6' : row.inProgress ? '#4ec9b0' : '#3a3a3a';
-      const btnDash   = row.inProgress ? '4,3' : null;
+      const btnFill   = isSelected ? '#1e3a5c' : row.stepFailed ? '#251515' : row.inProgress ? '#152515' : row.queued ? '#1a1a1a' : '#252526';
+      const btnStroke = isSelected ? '#569cd6' : row.stepFailed ? '#f44747' : row.inProgress ? '#4ec9b0' : row.queued ? '#444' : '#3a3a3a';
+      const btnDash   = (row.inProgress || row.stepFailed || row.queued) ? '4,3' : null;
       const btnRect   = svgEl('rect', {
         x: 0, y: by, width: LABEL_W, height: STEP_H,
         fill: btnFill, stroke: btnStroke, 'stroke-width': 1,
@@ -287,8 +351,8 @@ const Tree = (() => {
       svgEl('text', {
         x: lx, y: bcy - 14,
         class: 'tree-step-label', 'text-anchor': 'middle',
-        style: isSelected ? 'fill:#ffd700' : row.inProgress ? 'fill:#4ec9b0' : '',
-      }, g).textContent = row.stepNum ? `Step ${row.stepNum}` : row.inProgress ? 'running…' : '…';
+        style: isSelected ? 'fill:#ffd700' : row.stepFailed ? 'fill:#f44747' : row.inProgress ? 'fill:#4ec9b0' : row.queued ? 'fill:#555' : '',
+      }, g).textContent = row.stepNum ? `Step ${row.stepNum}` : row.stepFailed ? 'failed' : row.inProgress ? 'running…' : row.queued ? 'queued' : '…';
 
       if (row.opType) {
         svgEl('text', {
@@ -328,46 +392,111 @@ const Tree = (() => {
       }, svg);
     }
 
-    // Draw nodes
+    // Pre-compute posMap (needed before edges are drawn)
     rows.forEach((row, ri) => {
       row.agents.forEach(agent => {
-        const { cx, cy } = makeNode(svg, ri, agent, row.uid, row.inProgress);
-        posMap[ri][agent.agent_rank] = { cx, cy };
+        posMap[ri][agent.agent_rank] = { cx: nodeCx(agent.agent_rank), cy: nodeCy(ri) };
       });
     });
 
-    // Draw edges
+    // Draw edges (above dotted lines, below nodes)
+    const EDGE_COLORS = { fork: '#4ec9b0', shuffle: '#ce9178', base: '#569cd6', kill: '#569cd6', sort: '#569cd6', default: '#569cd6' };
     for (let ri = 0; ri + 1 < rows.length; ri++) {
-      const curRow  = rows[ri];
-      const nextRow = rows[ri + 1];
+      const curRow      = rows[ri];
+      const nextRow     = rows[ri + 1];
+
+      // Queued rows: draw grey dashed same-rank continuation edges only
+      if (nextRow.queued) {
+        nextRow.agents.forEach(nextAgent => {
+          const to   = posMap[ri + 1][nextAgent.agent_rank];
+          const from = posMap[ri][nextAgent.agent_rank];
+          if (!from || !to) return;
+          svgEl('line', {
+            x1: from.cx, y1: from.cy + NODE_H / 2,
+            x2: to.cx,   y2: to.cy   - NODE_H / 2,
+            stroke: '#3a3a3a', 'stroke-width': 1.5, 'stroke-dasharray': '4,3', fill: 'none',
+          }, svg);
+        });
+        continue;
+      }
+      const opType      = nextRow.opType || 'default';
+      const isForkStep    = nextRow.opType === 'fork';
+      const isShuffleStep = nextRow.opType === 'shuffle';
+      const consumedCurRanks = new Set();
+
+      const drawEdge = (from, to, cls) => {
+        svgEl('line', {
+          x1: from.cx, y1: from.cy + NODE_H / 2,
+          x2: to.cx,   y2: to.cy   - NODE_H / 2,
+          stroke: EDGE_COLORS[cls] || EDGE_COLORS.default,
+          'stroke-width': 2, fill: 'none',
+          class: `tree-edge ${cls}`,
+        }, svg);
+      };
 
       nextRow.agents.forEach(nextAgent => {
         const to = posMap[ri + 1][nextAgent.agent_rank];
         if (!to) return;
 
-        let srcRank = null;
-        if (nextAgent.parent_id) {
+        if (isForkStep && nextAgent.parent_id) {
+          // Fork: connect each child to its parent
           const src = curRow.agents.find(a => a.unique_id === nextAgent.parent_id);
-          if (src) srcRank = src.agent_rank;
+          if (!src) return;
+          consumedCurRanks.add(src.agent_rank);
+          const from = posMap[ri][src.agent_rank];
+          if (from) drawEdge(from, to, 'fork');
+
+        } else if (isShuffleStep && nextAgent.shuffle_sources) {
+          // Shuffle: draw one orange edge from each source rank to this agent
+          for (const srcRank of nextAgent.shuffle_sources) {
+            const from = posMap[ri][srcRank];
+            if (!from) continue;
+            consumedCurRanks.add(srcRank);
+            drawEdge(from, to, 'shuffle');
+          }
+
         } else {
-          const src = curRow.agents.find(a => a.unique_id === nextAgent.unique_id);
-          if (src) srcRank = src.agent_rank;
+          // Default: match by unique_id, then fall back to same rank
+          let src = (nextAgent.unique_id !== undefined)
+            ? curRow.agents.find(a => a.unique_id === nextAgent.unique_id)
+            : null;
+          if (!src) src = curRow.agents.find(a => a.agent_rank === nextAgent.agent_rank);
+          if (!src) return;
+          consumedCurRanks.add(src.agent_rank);
+          const from = posMap[ri][src.agent_rank];
+          if (from) drawEdge(from, to, opType);
         }
-        if (srcRank === null && curRow.agents.length === 1) srcRank = curRow.agents[0].agent_rank;
-        if (srcRank === null) return;
+      });
 
-        const from = posMap[ri][srcRank];
+      // For shuffle: all agents persist, so mark all matching ranks as consumed
+      if (isShuffleStep) {
+        const nextRankSet = new Set(nextRow.agents.map(a => a.agent_rank));
+        curRow.agents.forEach(a => {
+          if (nextRankSet.has(a.agent_rank)) consumedCurRanks.add(a.agent_rank);
+        });
+      }
+
+      // Dead-end (killed) agents: in curRow but not consumed by nextRow
+      curRow.agents.forEach(curAgent => {
+        if (consumedCurRanks.has(curAgent.agent_rank)) return;
+        const from = posMap[ri][curAgent.agent_rank];
         if (!from) return;
-
-        const isFork = !!nextAgent.parent_id;
-        const line   = svgEl('line', {
-          x1: from.cx, y1: from.cy + NODE_H / 2,
-          x2: to.cx,   y2: to.cy   - NODE_H / 2,
-          class: `tree-edge ${isFork ? 'fork' : ''}`,
-        }, svg);
-        svg.insertBefore(line, svg.firstChild);
+        const x  = from.cx;
+        const y1 = from.cy + NODE_H / 2;
+        const y2 = y1 + 14;
+        const xs = 5;
+        svgEl('line', { x1: x, y1, x2: x, y2, stroke: '#f44747', 'stroke-width': 2 }, svg);
+        svgEl('line', { x1: x - xs, y1: y2 - xs, x2: x + xs, y2: y2 + xs, stroke: '#f44747', 'stroke-width': 2 }, svg);
+        svgEl('line', { x1: x + xs, y1: y2 - xs, x2: x - xs, y2: y2 + xs, stroke: '#f44747', 'stroke-width': 2 }, svg);
       });
     }
+
+    // Draw nodes (above edges)
+    rows.forEach((row, ri) => {
+      row.agents.forEach(agent => {
+        makeNode(svg, ri, agent, row.uid, row.inProgress);
+      });
+    });
 
     // Auto-pan to show bottom when new steps arrive
     if (autoPanBottom) {
@@ -392,10 +521,13 @@ const Tree = (() => {
       _inProgress     = {};
       _pendingAgents  = new Set();
       _failedAgents   = {};
+      _agentStatus    = {};
       _agentLogs      = {};
       _logDialogRank  = null;
       _pendingStepNum = null;
       _pendingOpName  = null;
+      _stepFailed     = false;
+      _queue          = [];
       _selectedUid    = null;
       _selectedAgent = null;
       _onSelect     = onSelect;
@@ -408,12 +540,20 @@ const Tree = (() => {
     setRecords(records) { _records = records; render(); },
 
     onStepStarted(preAgents, stepNum, opName) {
+      _stepFailed     = false;
+      _queue          = [];
       _pendingAgents  = new Set(preAgents.map(a => a.agent_rank));
       _inProgress     = {};
       _failedAgents   = {};
+      _agentStatus    = {};
       _agentLogs      = {};
       _pendingStepNum = stepNum || null;
       _pendingOpName  = opName  || null;
+      render();
+    },
+
+    onAgentStarted(agentRank) {
+      _pendingAgents.add(agentRank);
       render();
     },
 
@@ -435,8 +575,14 @@ const Tree = (() => {
       }
     },
 
+    onAgentStatus(agentRank, status) {
+      _agentStatus[agentRank] = status;
+      render();
+    },
+
     onAgentCompleted(agentRank, state) {
       _inProgress[agentRank] = state;
+      delete _agentStatus[agentRank];
       // Keep _pendingAgents populated until step_completed so the in-progress
       // row stays visible the whole time; _inProgress tracks per-agent done state
       render();
@@ -444,6 +590,16 @@ const Tree = (() => {
 
     onAgentFailed(agentRank, error) {
       _failedAgents[agentRank] = error;
+      delete _agentStatus[agentRank];
+      // If the log dialog is open for this agent and has no streamed logs yet,
+      // populate it now with the error text from agent_failed
+      if (_logDialogRank === agentRank) {
+        const pre = document.getElementById('dlg-agent-log-text');
+        if (pre && !(_agentLogs[agentRank] || []).length && error) {
+          pre.innerHTML = error.split('\n').map(l => _formatLogLine('[stderr] ' + l)).join('\n');
+          pre.scrollTop = pre.scrollHeight;
+        }
+      }
       render();
     },
 
@@ -452,22 +608,55 @@ const Tree = (() => {
       _inProgress     = {};
       _pendingAgents  = new Set();
       _failedAgents   = {};
+      _agentStatus    = {};
+      _stepFailed     = false;
       _pendingStepNum = null;
       _pendingOpName  = null;
       render(true);  // auto-pan to bottom
     },
 
-    onStepFailed() {
-      // Mark remaining pending (not yet completed/failed) agents as failed too
+    onStepFailed(error) {
+      const fallback = error || 'Step failed.';
       for (const rank of _pendingAgents) {
-        if (_inProgress[rank] === undefined && _failedAgents[rank] === undefined) {
-          _failedAgents[rank] = 'Agent did not complete (step failed).';
+        // Set error for any agent without its own specific error (covers cancelled
+        // agents AND agents whose worker completed fine but post-processing failed)
+        if (_failedAgents[rank] === undefined) {
+          _failedAgents[rank] = fallback;
+        }
+        // Append step-level error to the log buffer so the dialog always shows it
+        if (error) {
+          if (!_agentLogs[rank]) _agentLogs[rank] = [];
+          const already = _agentLogs[rank].some(l => l.includes('--- step failed ---'));
+          if (!already) {
+            _agentLogs[rank].push('[stderr] --- step failed ---');
+            error.split('\n').forEach(l => { if (l.trim()) _agentLogs[rank].push('[stderr] ' + l); });
+          }
+          // Live-update dialog if it is open for this agent
+          if (_logDialogRank === rank) {
+            const pre = document.getElementById('dlg-agent-log-text');
+            if (pre) {
+              const lines = ['[stderr] --- step failed ---', ...error.split('\n').filter(l => l.trim()).map(l => '[stderr] ' + l)];
+              lines.forEach(l => {
+                if (pre.innerHTML || pre.children.length) pre.appendChild(document.createTextNode('\n'));
+                const span = document.createElement('span');
+                span.style.color = '#f44747';
+                span.textContent = l;
+                pre.appendChild(span);
+              });
+              pre.scrollTop = pre.scrollHeight;
+            }
+          }
         }
       }
-      _inProgress     = {};
-      _pendingAgents  = new Set();
-      _pendingStepNum = null;
-      _pendingOpName  = null;
+      _stepFailed    = true;
+      _inProgress    = {};
+      _pendingAgents = new Set();
+      _agentStatus   = {};
+      render();
+    },
+
+    onQueueUpdated(queue) {
+      _queue = queue || [];
       render();
     },
 

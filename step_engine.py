@@ -105,6 +105,7 @@ async def main() -> None:
     state_file = str(run_dir / "engine_state.pt")
 
     engine = Engine()
+    engine.workspace_base = run_dir / "workspaces"
 
     if os.path.isfile(state_file):
         engine.load_state(state_file)
@@ -157,11 +158,11 @@ def _print_engine_overview(engine: Engine, run_name: str, verbose_level: int = 1
     for agent in engine.agents:
         state = agent.get_state()
         rank = state.get("agent_rank", "?")
-        cfg = state.get("llm_state", {})
+        cfg = state.get("agent_config", {})
         print(log.engine(f"  ║"))
         print(log.engine(f"  ║  Agent {rank}  —  {cfg.get('base_url', '?')}  model={cfg.get('model', '?')}"))
         for k, v in state.items():
-            if k in ("agent_rank", "llm_state"):
+            if k in ("agent_rank", "agent_config"):
                 continue
             lines = log.format_value(v, full=full).splitlines()
             print(log.engine(f"  ║    {log.bold(k)}: {log.dim(lines[0])}"))

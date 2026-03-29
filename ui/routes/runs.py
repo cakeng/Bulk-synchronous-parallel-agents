@@ -49,6 +49,19 @@ async def delete_run(run_name: str) -> dict:
     return {"deleted": run_name}
 
 
+@router.get("/{run_name}/status")
+async def get_run_status(run_name: str) -> dict:
+    if not state_manager.has_run(run_name):
+        raise HTTPException(404, f"Run '{run_name}' not found")
+    run = state_manager.get_run(run_name)
+    return {
+        "running_operator": run.running_operator,
+        "queue": list(run.queue),
+        "step_log": list(run.step_log),
+        "agent_logs": {str(k): v for k, v in run.agent_logs.items()},
+    }
+
+
 @router.post("/{run_name}/kill")
 async def kill_run(run_name: str) -> dict:
     if not state_manager.has_run(run_name):

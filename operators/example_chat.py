@@ -15,7 +15,7 @@ class ExampleChat(Operator):
         parsed, raw, thinking, tool_calls, tokens = await run_agent(
             user_input    = f"What is {_local['agent_rank']} + {step}?",
             output_config = {"answer": int, "explanation": str},
-            agent_config  = _local["llm_state"],
+            agent_state   = _local,
         )
 
         _local["rank_step_answer"] = parsed["answer"]

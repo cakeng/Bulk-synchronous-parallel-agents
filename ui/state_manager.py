@@ -42,6 +42,10 @@ class RunState:
     queue: list[str] = field(default_factory=list)
     running_operator: str | None = None
     running_pid: int | None = None
+    # Buffered events from the current/last step for reconnecting clients
+    step_log: list[dict] = field(default_factory=list)
+    # Per-agent stdout/stderr lines for the current step (rank -> [lines])
+    agent_logs: dict[int, list[str]] = field(default_factory=dict)
 
 
 _runs: dict[str, RunState] = {}
@@ -213,7 +217,13 @@ def add_engine_state_record(
 def _slim_agents(agents: list[dict]) -> list[dict]:
     """Keep only structural fields for tree rendering."""
     slim_keys = {"agent_rank", "unique_id", "parent_id", "fork_rank"}
-    return [{k: v for k, v in a.items() if k in slim_keys} for a in agents]
+    result = []
+    for a in agents:
+        slim = {k: v for k, v in a.items() if k in slim_keys}
+        if "shuffle_output" in a and isinstance(a["shuffle_output"], dict):
+            slim["shuffle_sources"] = sorted(a["shuffle_output"].keys())
+        result.append(slim)
+    return result
 
 
 def load_full_engine_state(file_path: str) -> dict:

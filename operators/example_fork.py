@@ -15,7 +15,7 @@ class ExampleFork(ForkOperator):
         parsed, raw, thinking, tool_calls, tokens = await run_agent(
             user_input    = f"Give me a list of {rand_int} different cats.",
             output_config = {"answer": list[str], "explanation": str},
-            agent_config  = _local["llm_state"],
+            agent_state   = _local,
         )
 
         _local["cats"] = parsed["answer"]

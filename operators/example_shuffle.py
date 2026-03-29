@@ -16,7 +16,7 @@ class ExampleShuffle(ShuffleOperator):
         parsed, raw, thinking, tool_calls, tokens = await run_agent(
             user_input    = f"Give me a list of {_local['agent_rank'] + 1} different sharks.",
             output_config = {"answer": list[str], "explanation": str},
-            agent_config  = _local["llm_state"],
+            agent_state   = _local,
         )
 
         _local["sharks"] = parsed["answer"]

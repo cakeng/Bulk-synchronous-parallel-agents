@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import heapq
+import json
 import os
 import pickle
 import sys
@@ -13,7 +15,7 @@ from typing import Any, Dict, List
 import torch
 
 from .agent import Agent, compute_unique_id
-from . import log
+from . import log, tools as _tools
 
 DEFAULT_STATE_FILE = "engine_state.pt"
 
@@ -37,6 +39,11 @@ class Engine:
     def __init__(self) -> None:
         self.agents: List[Agent] = []
         self.globals: Dict[str, Any] = {"step": 0}
+        self.workspace_base: Path | None = None  # set by step_engine before initialize()
+        # Tool-slot semaphore state — re-initialised at the start of every run_operator call
+        self._tool_slots_available: int = 10
+        self._tool_waiters: list = []   # min-heap of (rank, uid, asyncio.Event)
+        self._tool_waiter_uid: int = 0  # monotonic counter used as heap tiebreaker
 
     # ------------------------------------------------------------------
     # State management
@@ -45,6 +52,7 @@ class Engine:
     def initialize(self, llm_state: dict | None = None) -> None:
         self.agents = [Agent(agent_rank=0, llm_state=llm_state)]
         self.globals = {"step": 0, "agent_size": 1}
+        self._setup_agent_workspace(self.agents[0])
         log.print_engine("[Engine] Initialized new engine with 1 agent.")
 
     def load_state(self, path: str = DEFAULT_STATE_FILE) -> None:
@@ -72,6 +80,43 @@ class Engine:
     # Operator execution
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Tool-slot priority semaphore
+    # ------------------------------------------------------------------
+
+    async def _acquire_tool_slot(self, rank: int, stdin) -> None:
+        """Block until a tool-execution slot is available, granting priority to lower ranks."""
+        if self._tool_slots_available > 0:
+            self._tool_slots_available -= 1
+            stdin.write(b"go\n")
+            await stdin.drain()
+            return
+        event = asyncio.Event()
+        uid = self._tool_waiter_uid
+        self._tool_waiter_uid += 1
+        heapq.heappush(self._tool_waiters, (rank, uid, event))
+        try:
+            await event.wait()
+        except asyncio.CancelledError:
+            # Subprocess was killed while waiting — remove from the heap and propagate.
+            self._tool_waiters = [t for t in self._tool_waiters if t[2] is not event]
+            heapq.heapify(self._tool_waiters)
+            raise
+        stdin.write(b"go\n")
+        await stdin.drain()
+
+    async def _release_tool_slot(self) -> None:
+        """Return one slot; wake the lowest-rank waiting agent if any."""
+        if self._tool_waiters:
+            _, _, event = heapq.heappop(self._tool_waiters)
+            event.set()
+        else:
+            self._tool_slots_available += 1
+
+    # ------------------------------------------------------------------
+    # Operator execution
+    # ------------------------------------------------------------------
+
     async def run_operator(
         self,
         operator_path: str,
@@ -82,6 +127,11 @@ class Engine:
     ) -> None:
         self.globals["step"] = self.globals.get("step", 0) + 1
         self.globals["agent_size"] = len(self.agents)
+        # Re-initialise tool-slot semaphore for this step
+        limit = max(1, int(self.globals.get("concurrent_tool_call_limit", 10)))
+        self._tool_slots_available = limit
+        self._tool_waiters = []
+        self._tool_waiter_uid = 0
         operator_path = str(Path(operator_path).resolve())
 
         engine_vars: Dict[str, Any] = {"engine_globals": dict(self.globals)}
@@ -195,9 +245,11 @@ class Engine:
                 "--agent-state", input_path,
                 "--operator",    operator_path,
                 "--output",      output_path,
+                stdin=asyncio.subprocess.PIPE,   # used for tool-slot grant signals
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=project_root,
+                limit=8 * 1024 * 1024,  # 8 MB — avoids "chunk longer than limit" on large tool outputs
             )
 
             stderr_lines: list[str] = []
@@ -208,6 +260,21 @@ class Engine:
                     line = raw.decode().rstrip()
                     log.print_agent_out(prefix, line)
                     if ui_callback:
+                        try:
+                            event = json.loads(line)
+                            if isinstance(event, dict) and "type" in event:
+                                etype = event.get("type")
+                                if etype == "tool_slot_request":
+                                    await self._acquire_tool_slot(agent_rank, proc.stdin)
+                                    continue
+                                if etype == "tool_slot_release":
+                                    await self._release_tool_slot()
+                                    continue
+                                event["agent_rank"] = agent_rank
+                                await ui_callback(event)
+                                continue
+                        except (json.JSONDecodeError, TypeError):
+                            pass
                         await ui_callback({"type": "agent_log", "agent_rank": agent_rank, "stream": "stdout", "text": line})
 
             async def _stream_stderr() -> None:
@@ -219,8 +286,22 @@ class Engine:
                     if ui_callback:
                         await ui_callback({"type": "agent_log", "agent_rank": agent_rank, "stream": "stderr", "text": line})
 
-            await asyncio.gather(_stream_stdout(), _stream_stderr())
+            # Run stream tasks concurrently; wait for the process to exit first,
+            # then drain streams (they finish naturally on EOF).  Force-cancel after
+            # 2 s to unblock any task stuck in _acquire_tool_slot when the
+            # subprocess was killed before a slot was granted.
+            stdout_task = asyncio.create_task(_stream_stdout())
+            stderr_task = asyncio.create_task(_stream_stderr())
             await proc.wait()
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(stdout_task, stderr_task, return_exceptions=True),
+                    timeout=2.0,
+                )
+            except asyncio.TimeoutError:
+                stdout_task.cancel()
+                stderr_task.cancel()
+                await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
 
             if proc.returncode != 0:
                 error_text = "\n".join(stderr_lines).strip()
@@ -277,6 +358,16 @@ class Engine:
     # Post-processing for special operator types
     # ------------------------------------------------------------------
 
+    def _setup_agent_workspace(self, agent: Agent) -> None:
+        """Create the workspace directory for an agent and populate agent_config with tools."""
+        if not self.workspace_base:
+            return
+        uid = agent["unique_id"]
+        ws = self.workspace_base / uid
+        ws.mkdir(parents=True, exist_ok=True)
+        agent["workspace_dir"] = str(ws)
+        agent["agent_config"]["tools"] = _tools.build_tool_schemas()
+
     def _reindex_agents(self) -> None:
         """Reassign sequential agent_ranks based on current list order."""
         for new_rank, agent in enumerate(self.agents):
@@ -294,6 +385,7 @@ class Engine:
                 state["unique_id"] = compute_unique_id(state)
                 child = Agent(agent_rank=0)   # temp rank; reindexed below
                 child.set_state(state)
+                self._setup_agent_workspace(child)  # new workspace per child uid
                 new_agents.append(child)
         self.agents = new_agents
         self._reindex_agents()

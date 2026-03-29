@@ -9,7 +9,7 @@ class ExampleLocal(Operator):
     async def run(self, _local, _global):
         step = _global["step"]
 
-        _local["llm_state"]["context"].append(
+        _local["agent_config"]["context"].append(
             {"role": "user", "content": f"This is engine step {step}."}
         )
 

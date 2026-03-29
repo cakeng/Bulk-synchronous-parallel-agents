@@ -12,7 +12,7 @@ Auto-unpack / auto-pack
 Every plain variable name that is *read* in the body is unpacked from
 ``_local`` before execution::
 
-    llm_state = _local.get('llm_state')
+    my_var = _local.get('my_var')
 
 Every plain variable name that is *written* in the body (plus all that were
 unpacked) is packed back into ``_local`` inside a ``finally`` block, so the
@@ -21,7 +21,7 @@ pack still runs even when the body returns early::
     try:
         <body>
     finally:
-        try: _local['llm_state'] = llm_state
+        try: _local['my_var'] = my_var
         except NameError: pass
 
 Names starting with ``_`` (e.g. ``_tmp``) are excluded from auto-management.
@@ -53,9 +53,9 @@ _BASE_CLASS: dict[str, str] = {
 DEFAULT_BODIES: dict[str, str] = {
     "base": """\
 _parsed, _raw, _thinking, _tool_calls, _tokens = await run_agent(
-    user_input="Hello!",
+    user_input=f"Hello!",
     output_config={"reply": str},
-    agent_config=llm_state,
+    agent_state=_local,
 )
 last_reply = _parsed["reply"]
 """,
@@ -67,7 +67,7 @@ num = random.randint(1, 5)
 _parsed, _raw, _thinking, _tool_calls, _tokens = await run_agent(
     user_input=f"Give me {num} different cat species.",
     output_config={"answer": list[str]},
-    agent_config=llm_state,
+    agent_state=_local,
 )
 cats = _parsed["answer"]
 return len(cats)
@@ -83,7 +83,7 @@ num = random.randint(1, 10)
 _parsed, _raw, _thinking, _tool_calls, _tokens = await run_agent(
     user_input=f"What is the {num}th largest state in the United States?",
     output_config={"answer": str},
-    agent_config=llm_state,
+    agent_state=_local,
 )
 state = _parsed["answer"]
 state_int = char_to_int(state[0])
@@ -100,7 +100,7 @@ num = random.randint(1, 10)
 _parsed, _raw, _thinking, _tool_calls, _tokens = await run_agent(
     user_input=f"Who is the {num}th president of the United States?",
     output_config={"answer": str},
-    agent_config=llm_state,
+    agent_state=_local,
 )
 president = _parsed["answer"]
 president_int = char_to_int(president[0])
@@ -114,7 +114,7 @@ num = random.randint(1, 5)
 _parsed, _raw, _thinking, _tool_calls, _tokens = await run_agent(
     user_input=f"Give me {num} different sharks.",
     output_config={"answer": list[str]},
-    agent_config=llm_state,
+    agent_state=_local,
 )
 sharks = _parsed["answer"]
 return (sharks, list(range(_global.agent_size)))

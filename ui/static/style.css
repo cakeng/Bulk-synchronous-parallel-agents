@@ -239,14 +239,36 @@ html, body { height: 100%; overflow: hidden; font-family: system-ui, sans-serif;
 .tree-node.agent-failed { opacity: 0.6; cursor: pointer; }
 .tree-node.agent-failed rect { fill: #3a0808; stroke: #f44747; stroke-width: 2; }
 .tree-node.agent-failed text { fill: #f44747 !important; }
+.tree-node.queued { opacity: 0.35; }
+.tree-node.queued rect { fill: #1a1a1a; stroke: #444; stroke-dasharray: 4,2; }
+.tree-node.queued text { fill: #555 !important; }
 .tree-node text { fill: #d4d4d4; font-size: 11px; pointer-events: none; }
 
-.tree-edge { stroke: #555; stroke-width: 1.5; fill: none; }
-.tree-edge.fork { stroke: #4ec9b0; }
-.tree-edge.kill { stroke: #f44747; opacity: 0.4; }
+.tree-edge { stroke-width: 2; fill: none; }
+.tree-edge.fork    { stroke: #4ec9b0; }  /* green — parent-child (fork) */
+.tree-edge.shuffle { stroke: #ce9178; }  /* orange — information movement */
+.tree-edge.base, .tree-edge.sort, .tree-edge.kill { stroke: #569cd6; }  /* blue — same agent */
 
 .tree-step-label { font-size: 10px; fill: #666; text-anchor: middle; }
 .tree-op-label { font-size: 11px; fill: #9cdcfe; text-anchor: middle; }
+
+/* ─── Tree status label ───────────────────────────────────────────────────── */
+#tree-status {
+  font-size: 11px;
+  font-weight: 400;
+  color: #6a9f6a;
+  letter-spacing: normal;
+  text-transform: none;
+}
+@keyframes tree-status-dots {
+  0%,  100% { content: '.';   }
+  33%        { content: '..';  }
+  66%        { content: '...'; }
+}
+#tree-status.running::after {
+  content: '.';
+  animation: tree-status-dots 1.2s steps(1) infinite;
+}
 
 /* ─── Right panel: operator editor ───────────────────────────────────────────── */
 #editor-panel .panel-header { gap: 4px; justify-content: flex-start; }
@@ -359,12 +381,31 @@ html, body { height: 100%; overflow: hidden; font-family: system-ui, sans-serif;
 .var-value.expandable { color: #666; cursor: pointer; }
 .var-value.expandable:hover { color: #aaa; }
 
+/* Chat context toggle buttons */
+.chat-toggle-btn {
+  margin-left: auto;
+  background: #3c3c3c;
+  border: 1px solid #555;
+  color: #888;
+  padding: 2px 7px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 10px;
+  margin-left: 4px;
+}
+.chat-toggle-btn:first-of-type { margin-left: auto; }
+.chat-toggle-btn:hover { background: #4a4a4a; color: #d4d4d4; }
+.chat-toggle-btn.active { background: #1e3a5c; border-color: #569cd6; color: #569cd6; }
+
 /* Chat context */
 #chat-context { display: flex; flex-direction: column; gap: 6px; }
 .chat-msg { padding: 5px 8px; border-radius: 6px; max-width: 90%; font-size: 12px; line-height: 1.4; white-space: pre-wrap; word-break: break-word; }
 .chat-msg.user { background: #1a3a5c; align-self: flex-end; color: #d4d4d4; }
 .chat-msg.assistant { background: #2a2a2a; align-self: flex-start; color: #d4d4d4; }
 .chat-msg.system { background: #2d2d1a; align-self: stretch; color: #888; font-size: 11px; max-width: 100%; }
+.chat-msg.thinking { background: #1e1a2d; align-self: flex-start; color: #c586c0; border-left: 2px solid #6a3d8a; font-style: italic; max-width: 95%; }
+.chat-msg.tool-call { background: #2d1f0e; align-self: flex-start; color: #ce9178; border-left: 2px solid #8a5a20; font-family: monospace; max-width: 95%; }
+.chat-msg.tool-result { background: #0e2a2a; align-self: flex-start; color: #4ec9b0; border-left: 2px solid #1a6a5a; font-family: monospace; max-width: 95%; }
 .chat-msg-role { font-size: 10px; color: #666; margin-bottom: 2px; }
 
 /* Bottom nav */

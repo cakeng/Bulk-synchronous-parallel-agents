@@ -334,20 +334,30 @@ const OperatorPanel = (() => {
     }
   }
 
+  // ── Update running/queued CSS classes without rebuilding the DOM ─────────
+  function _updateCellClasses() {
+    const cells = container()?.querySelectorAll('.op-cell') || [];
+    cells.forEach(cell => {
+      const name = cell.dataset.name;
+      cell.classList.toggle('running-cell', name === _runningOp);
+      cell.classList.toggle('queued-cell',  _queuedOps.includes(name));
+    });
+  }
+
   // ── WebSocket event handlers ──────────────────────────────────────────────
   function onQueueUpdated(queue) {
     _queuedOps = queue;
-    render();
+    _updateCellClasses();
   }
 
   function onStepStarted(opName) {
     _runningOp = opName;
-    render();
+    _updateCellClasses();
   }
 
   function onStepDone() {
     _runningOp = null;
-    render();
+    _updateCellClasses();
   }
 
   // ── Public API ────────────────────────────────────────────────────────────

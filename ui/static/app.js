@@ -8,6 +8,14 @@ const App = {
   sockets: {},   // run -> WebSocket
 };
 
+// ── Tree status label ─────────────────────────────────────────────────────────
+function setTreeStatus(text, running) {
+  const el = document.getElementById('tree-status');
+  el.textContent = text;
+  el.classList.toggle('running', !!running);
+}
+function clearTreeStatus() { setTreeStatus(''); }
+
 // ── Fetch helpers ─────────────────────────────────────────────────────────────
 async function api(method, path, body) {
   const opts = { method, headers: {} };
@@ -43,7 +51,11 @@ async function switchRun(name) {
 }
 
 async function loadRunData(runName) {
-  const stateData = await api('GET', `/api/runs/${runName}/engine_states`);
+  clearTreeStatus();
+  const [stateData, statusData] = await Promise.all([
+    api('GET', `/api/runs/${runName}/engine_states`),
+    api('GET', `/api/runs/${runName}/status`),
+  ]);
   const records = stateData.engine_states;
 
   connectWS(runName);
@@ -51,6 +63,22 @@ async function loadRunData(runName) {
   Tree.init(runName, records, (uid, agentRank) => { BottomPanels.selectState(uid, agentRank); });
   BottomPanels.init(runName, records);
   await OperatorPanel.load(runName);
+
+  // Replay any in-progress step state (handles tab-switch without WS reconnect)
+  for (const event of statusData.step_log) {
+    handleWsEvent(runName, event);
+  }
+  // Replay per-agent stdout/stderr/status logs
+  for (const [rank, lines] of Object.entries(statusData.agent_logs || {})) {
+    for (const line of lines) {
+      // Lines are already fully formatted (with [stderr] / [status] / [tool] prefixes).
+      // Feed them as 'stdout' so _formatLogLine handles the colouring.
+      Tree.onAgentLog(Number(rank), 'stdout', line);
+    }
+  }
+  if (statusData.queue && statusData.queue.length > 0) {
+    handleWsEvent(runName, { type: 'queue_updated', run: runName, queue: statusData.queue });
+  }
 }
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
@@ -83,11 +111,18 @@ function handleWsEvent(runName, msg) {
       break;
 
     case 'step_started':
+      setTreeStatus('Running', true);
       OperatorPanel.onStepStarted(msg.operator_name);
       Tree.onStepStarted(msg.pre_agents || [], msg.step_num, msg.operator_name);
       break;
 
     case 'agent_started':
+      Tree.onAgentStarted(msg.agent_rank);
+      break;
+
+    case 'agent_status':
+      Tree.onAgentStatus(msg.agent_rank, msg.status);
+      Tree.onAgentLog(msg.agent_rank, 'stdout', `[status] ${msg.status}`);
       break;
 
     case 'agent_completed':
@@ -104,18 +139,21 @@ function handleWsEvent(runName, msg) {
       break;
 
     case 'step_completed':
+      clearTreeStatus();
       OperatorPanel.onStepDone();
       Tree.onStepCompleted(msg.record);
       BottomPanels.onRecordAdded(msg.record);
       break;
 
     case 'step_failed':
+      clearTreeStatus();
       OperatorPanel.onStepDone();
-      Tree.onStepFailed();
+      Tree.onStepFailed(msg.error || '');
       break;
 
     case 'queue_updated':
       OperatorPanel.onQueueUpdated(msg.queue);
+      Tree.onQueueUpdated(msg.queue);
       break;
 
     case 'log_line':

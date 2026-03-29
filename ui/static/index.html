@@ -31,6 +31,7 @@
     <div class="panel" id="tree-panel">
       <div class="panel-header">
         Execution Tree
+        <span id="tree-status"></span>
         <button id="delete-states-btn">Delete Step</button>
       </div>
       <div class="panel-body" id="tree-body">
@@ -93,7 +94,11 @@
 
     <!-- Chat context -->
     <div class="panel">
-      <div class="panel-header">Chat Context</div>
+      <div class="panel-header">
+        Chat Context
+        <button id="btn-show-thinking" class="chat-toggle-btn">Show Thinking</button>
+        <button id="btn-show-tool-calls" class="chat-toggle-btn">Show Tool Calls</button>
+      </div>
       <div class="bottom-panel" id="chat-panel">
         <div id="chat-context"></div>
       </div>

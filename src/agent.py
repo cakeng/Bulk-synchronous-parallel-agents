@@ -17,7 +17,7 @@ def compute_unique_id(state: dict) -> str:
     except Exception:
         raw = repr(sorted(state_for_hash.items())).encode()
     digest = hashlib.sha256(raw).digest()
-    return base64.b64encode(digest).decode()[-8:]
+    return base64.urlsafe_b64encode(digest).decode()[-8:]
 
 
 # Default LLM server config (matches vllm_state.yaml)
@@ -32,16 +32,16 @@ class Agent:
     """Single agent with an isolated variable dictionary.
 
     Variables are accessed and set via dict-style syntax:
-        context = agent["llm_state"]["context"]
+        context = agent["agent_config"]["context"]
         agent["result"] = "some value"
 
     Or attribute-style (for convenience):
-        context = agent.llm_state["context"]
+        context = agent.agent_config["context"]
         agent.result = "some value"
 
     Built-in keys always present:
-        agent_rank: int  — rank (position) assigned by the engine
-        llm_state : dict — LLM connection info and chat context; built-in keys:
+        agent_rank  : int  — rank (position) assigned by the engine
+        agent_config: dict — LLM connection info and chat context; built-in keys:
             base_url : str  — vLLM server URL
             api_key  : str  — API key
             model    : str  — model name
@@ -52,7 +52,7 @@ class Agent:
         # Store everything in a flat dict; access via __getitem__/__setitem__
         d: Dict[str, Any] = {
             "agent_rank": agent_rank,
-            "llm_state": {"context": [], **DEFAULT_LLM_CONFIG, **(llm_state or {})},
+            "agent_config": {"context": [], **DEFAULT_LLM_CONFIG, **(llm_state or {})},
         }
         d["unique_id"] = compute_unique_id(d)
         object.__setattr__(self, "_vars", d)
@@ -137,7 +137,7 @@ class Agent:
         Returns:
             openai.types.chat.ChatCompletion response object.
         """
-        cfg = self._vars["llm_state"]
+        cfg = self._vars["agent_config"]
         if messages is None:
             messages = cfg["context"]
 

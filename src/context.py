@@ -4,10 +4,10 @@ Usage inside an operator::
 
     from src.context import Context
 
-    ctx = Context(_local["llm_state"]["context"])
+    ctx = Context(_local["agent_config"]["context"])
     ctx.user("Hello, what is 2 + 2?")
     ...
-    _local["llm_state"]["context"] = ctx.messages
+    _local["agent_config"]["context"] = ctx.messages
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ class Context:
 
     Attributes:
         messages: The working message list — updated by ``run_agent`` and
-                  written back to ``_local["llm_state"]["context"]`` on success.
+                  written back to ``_local["agent_config"]["context"]`` on success.
     """
 
     def __init__(self, messages: List[Dict[str, str]]) -> None:

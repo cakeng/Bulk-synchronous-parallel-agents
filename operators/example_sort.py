@@ -18,7 +18,7 @@ class ExampleSort(SortOperator):
         parsed, raw, thinking, tool_calls, tokens = await run_agent(
             user_input    = f"Who is the {_local['agent_rank'] + 1}th president of the United States?",
             output_config = {"answer": str, "explanation": str},
-            agent_config  = _local["llm_state"],
+            agent_state   = _local,
         )
         president = parsed["answer"]
         president_int = self.char_to_int(president[0])
