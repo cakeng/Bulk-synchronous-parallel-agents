@@ -85,7 +85,7 @@ class Engine:
     # ------------------------------------------------------------------
 
     async def _acquire_tool_slot(self, rank: int, stdin) -> None:
-        """Block until a tool-execution slot is available, granting priority to lower ranks."""
+        """Block until a tool-execution slot is available (legacy stdin mode)."""
         if self._tool_slots_available > 0:
             self._tool_slots_available -= 1
             stdin.write(b"go\n")
@@ -104,6 +104,32 @@ class Engine:
             raise
         stdin.write(b"go\n")
         await stdin.drain()
+
+    async def _acquire_tool_slot_tcp(self, rank: int, writer: asyncio.StreamWriter) -> None:
+        """TCP variant: grant sent as JSON over the worker's TCP connection."""
+        if self._tool_slots_available > 0:
+            self._tool_slots_available -= 1
+            writer.write(b'{"type":"tool_slot_grant"}\n')
+            try:
+                await writer.drain()
+            except Exception:
+                self._tool_slots_available += 1  # refund on broken connection
+            return
+        event = asyncio.Event()
+        uid = self._tool_waiter_uid
+        self._tool_waiter_uid += 1
+        heapq.heappush(self._tool_waiters, (rank, uid, event))
+        try:
+            await event.wait()
+        except asyncio.CancelledError:
+            self._tool_waiters = [t for t in self._tool_waiters if t[2] is not event]
+            heapq.heapify(self._tool_waiters)
+            raise
+        writer.write(b'{"type":"tool_slot_grant"}\n')
+        try:
+            await writer.drain()
+        except Exception:
+            self._tool_slots_available += 1  # refund on broken connection
 
     async def _release_tool_slot(self) -> None:
         """Return one slot; wake the lowest-rank waiting agent if any."""
@@ -124,6 +150,7 @@ class Engine:
         verbose: int = 0,
         debug: bool = False,
         ui_callback=None,   # async callable(event: dict) | None
+        kill_failed: bool = False,
     ) -> None:
         self.globals["step"] = self.globals.get("step", 0) + 1
         self.globals["agent_size"] = len(self.agents)
@@ -142,43 +169,109 @@ class Engine:
             f"'{Path(operator_path).name}' on {len(self.agents)} agent(s)  [{mode}]"
         )
 
+        # Start worker TCP event server when running under the UI so workers
+        # can send events and tool-slot signals without touching stdout.
+        _tcp_server = None
+        _engine_tcp_port: int | None = None
+        if ui_callback:
+            async def _handle_worker_conn(
+                reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+            ) -> None:
+                try:
+                    line = await reader.readline()
+                    if not line:
+                        return
+                    hello     = json.loads(line)
+                    wrank     = int(hello.get("agent_rank", 0))
+                    async for raw in reader:
+                        if not raw:
+                            break
+                        try:
+                            event = json.loads(raw.decode())
+                            etype = event.get("type")
+                            if etype == "tool_slot_request":
+                                await self._acquire_tool_slot_tcp(wrank, writer)
+                            elif etype == "tool_slot_release":
+                                await self._release_tool_slot()
+                            else:
+                                event["agent_rank"] = wrank
+                                await ui_callback(event)
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+                except Exception:
+                    pass
+                finally:
+                    # Close our writer so the worker's ipc.close() / wait_closed() unblocks.
+                    if not writer.is_closing():
+                        try:
+                            writer.close()
+                        except Exception:
+                            pass
+
+            _tcp_server = await asyncio.start_server(
+                _handle_worker_conn, "127.0.0.1", 0
+            )
+            _engine_tcp_port = _tcp_server.sockets[0].getsockname()[1]
+
         # Notify UI that agents are starting
         if ui_callback:
             for agent in self.agents:
                 await ui_callback({"type": "agent_started", "agent_rank": agent["agent_rank"]})
 
-        if debug:
-            results = []
+        try:
+          if debug:
+            raw_results = []
             for agent in self.agents:
-                result = await self._run_agent_subprocess(
-                    agent, operator_path, engine_vars=engine_vars,
-                    verbose=verbose, ui_callback=ui_callback,
-                )
-                results.append(result)
-        else:
+                try:
+                    raw_results.append(await self._run_agent_subprocess(
+                        agent, operator_path, engine_vars=engine_vars,
+                        verbose=verbose, ui_callback=ui_callback,
+                        engine_tcp_port=_engine_tcp_port,
+                    ))
+                except Exception as exc:
+                    raw_results.append(exc)
+          else:
             tasks = [
                 asyncio.create_task(
                     self._run_agent_subprocess(
                         agent, operator_path, engine_vars=engine_vars,
                         verbose=verbose, ui_callback=ui_callback,
+                        engine_tcp_port=_engine_tcp_port,
                     )
                 )
                 for agent in self.agents
             ]
-            results = await asyncio.gather(*tasks)
+            raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            if _tcp_server is not None:
+                _tcp_server.close()
+                await _tcp_server.wait_closed()
 
-        # All worker outputs: {"state": ..., "return_value": ..., "operator_type": ...}
-        op_type = results[0]["operator_type"] if results else "base"
+        # Determine operator type from the first successful result.
+        op_type = next(
+            (r["operator_type"] for r in raw_results if not isinstance(r, Exception)),
+            "base",
+        )
+        # Neutral return values used for failed agents so post-processing stays valid.
+        _neutral: Dict[str, Any] = {"base": None, "fork": 1, "kill": False, "sort": 0.0, "shuffle": (None, [])}
 
-        # Merge globals and apply new states to agents
+        # Merge globals and apply new states to agents; mark step_success on each.
         merged_globals = dict(self.globals)
         new_states: List[dict] = []
         return_values: List[Any] = []
-        for result in results:
-            state = result["state"]
-            merged_globals.update(state.pop("engine_globals", {}))
-            new_states.append(state)
-            return_values.append(result["return_value"])
+        for agent, result in zip(self.agents, raw_results):
+            if isinstance(result, Exception):
+                # Keep the pre-step state; mark failure.
+                state = agent.get_state()
+                state["step_success"] = False
+                new_states.append(state)
+                return_values.append(_neutral.get(op_type))
+            else:
+                state = result["state"]
+                merged_globals.update(state.pop("engine_globals", {}))
+                state["step_success"] = True
+                new_states.append(state)
+                return_values.append(result["return_value"])
 
         self.globals = merged_globals
         for agent, state in zip(self.agents, new_states):
@@ -193,6 +286,14 @@ class Engine:
             self._apply_sort(return_values)
         elif op_type == "shuffle":
             self._apply_shuffle(return_values)
+
+        if kill_failed:
+            before = len(self.agents)
+            self.agents = [a for a in self.agents if a.get("step_success", True)]
+            self._reindex_agents()
+            removed = before - len(self.agents)
+            if removed:
+                log.print_engine(f"[Engine] kill_failed: removed {removed} failed agent(s).")
 
         self.globals["agent_size"] = len(self.agents)
         log.print_engine(
@@ -220,6 +321,7 @@ class Engine:
         engine_vars: Dict[str, Any],
         verbose: int = 0,
         ui_callback=None,
+        engine_tcp_port: int | None = None,
     ) -> dict:
         """Returns the raw worker output dict:
         {"state": ..., "return_value": ..., "operator_type": ...}
@@ -239,17 +341,23 @@ class Engine:
         output_path  = input_path + ".out.pkl"
         project_root = str(Path(__file__).resolve().parent.parent)
 
+        use_tcp = engine_tcp_port is not None
+        worker_env = {**os.environ, "BSA_ENGINE_TCP_PORT": str(engine_tcp_port)} if use_tcp else None
+
         try:
             proc = await asyncio.create_subprocess_exec(
                 sys.executable, "-m", "src.worker",
                 "--agent-state", input_path,
                 "--operator",    operator_path,
                 "--output",      output_path,
-                stdin=asyncio.subprocess.PIPE,   # used for tool-slot grant signals
+                # TCP mode: stdin unused (tool-slot signals go over TCP).
+                # Standalone mode: stdin carries tool-slot grant signals.
+                stdin=asyncio.subprocess.DEVNULL if use_tcp else asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=project_root,
-                limit=8 * 1024 * 1024,  # 8 MB — avoids "chunk longer than limit" on large tool outputs
+                env=worker_env,
+                limit=8 * 1024 * 1024,
             )
 
             stderr_lines: list[str] = []
@@ -258,33 +366,47 @@ class Engine:
                 assert proc.stdout
                 async for raw in proc.stdout:
                     line = raw.decode().rstrip()
-                    log.print_agent_out(prefix, line)
-                    if ui_callback:
-                        try:
-                            event = json.loads(line)
-                            if isinstance(event, dict) and "type" in event:
-                                etype = event.get("type")
-                                if etype == "tool_slot_request":
-                                    await self._acquire_tool_slot(agent_rank, proc.stdin)
+                    if not line:
+                        continue
+                    if use_tcp:
+                        # TCP mode: stdout is for debug only (user print() calls,
+                        # Python tracebacks). Forward as tagged debug log.
+                        if ui_callback:
+                            await ui_callback({"type": "agent_log", "agent_rank": agent_rank, "stream": "stdout", "text": f"[debug] {line}"})
+                        else:
+                            log.print_agent_out(prefix, line)
+                    else:
+                        # Standalone / non-TCP mode: parse structured events from stdout
+                        # (legacy path — keeps direct step_engine.py invocations working).
+                        if ui_callback:
+                            try:
+                                event = json.loads(line)
+                                if isinstance(event, dict) and "type" in event:
+                                    etype = event.get("type")
+                                    if etype == "tool_slot_request":
+                                        await self._acquire_tool_slot(agent_rank, proc.stdin)
+                                        continue
+                                    if etype == "tool_slot_release":
+                                        await self._release_tool_slot()
+                                        continue
+                                    event["agent_rank"] = agent_rank
+                                    await ui_callback(event)
                                     continue
-                                if etype == "tool_slot_release":
-                                    await self._release_tool_slot()
-                                    continue
-                                event["agent_rank"] = agent_rank
-                                await ui_callback(event)
-                                continue
-                        except (json.JSONDecodeError, TypeError):
-                            pass
-                        await ui_callback({"type": "agent_log", "agent_rank": agent_rank, "stream": "stdout", "text": line})
+                            except (json.JSONDecodeError, TypeError):
+                                pass
+                            await ui_callback({"type": "agent_log", "agent_rank": agent_rank, "stream": "stdout", "text": line})
+                        else:
+                            log.print_agent_out(prefix, line)
 
             async def _stream_stderr() -> None:
                 assert proc.stderr
                 async for raw in proc.stderr:
                     line = raw.decode().rstrip()
                     stderr_lines.append(line)
-                    log.print_agent_err(prefix, line)
                     if ui_callback:
                         await ui_callback({"type": "agent_log", "agent_rank": agent_rank, "stream": "stderr", "text": line})
+                    else:
+                        log.print_agent_err(prefix, line)
 
             # Run stream tasks concurrently; wait for the process to exit first,
             # then drain streams (they finish naturally on EOF).  Force-cancel after
@@ -395,7 +517,14 @@ class Engine:
 
     def _apply_kill(self, return_values: List[bool]) -> None:
         """Remove agents that returned True; refuse if all would be killed."""
-        if all(return_values):
+        # Only count agents that actually ran (step_success=True) when checking
+        # the all-kill guard — failed agents carry neutral False and must not
+        # mask a legitimate all-True vote from the successful agents.
+        successful_votes = [
+            rv for a, rv in zip(self.agents, return_values)
+            if a.get("step_success", True)
+        ]
+        if successful_votes and all(successful_votes):
             raise RuntimeError(
                 "KillOperator: all agents returned True — "
                 "refusing to eliminate the entire agent list."
@@ -422,12 +551,14 @@ class Engine:
 
     def _apply_shuffle(self, return_values: List[tuple]) -> None:
         """Distribute shared objects; populate each agent's ``shuffle_output``."""
-        # Build lookup: agent_rank -> shared object
+        # Build lookup: agent_rank -> shared object (skip failed agents whose rv is None)
         rank_to_obj: Dict[int, Any] = {
             agent["agent_rank"]: rv[0]
             for agent, rv in zip(self.agents, return_values)
+            if rv is not None
         }
-        for agent, (_, requested_ranks) in zip(self.agents, return_values):
+        for agent, rv in zip(self.agents, return_values):
+            _, requested_ranks = rv if rv is not None else (None, [])
             shuffle_output: Dict[int, Any] = {}
             for rank in requested_ranks:
                 if rank not in rank_to_obj:

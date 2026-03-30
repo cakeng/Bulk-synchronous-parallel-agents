@@ -47,9 +47,14 @@ const BottomPanels = (() => {
     const tbl = document.getElementById('agent-vars-table');
     tbl.innerHTML = '';
     for (const [k, v] of Object.entries(agent)) {
-      if (k === 'agent_config') continue;
+      let displayValue = v;
+      if (k === 'agent_config') {
+        // Show config but strip context/call_log (already visible in chat panel)
+        const { context, call_log, ...rest } = v || {};
+        displayValue = rest;
+      }
       const tr = document.createElement('tr');
-      const valStr = JSON.stringify(v);
+      const valStr = JSON.stringify(displayValue);
       const short = valStr.length <= VAL_MAX;
       const displayVal = short
         ? escHtml(valStr)

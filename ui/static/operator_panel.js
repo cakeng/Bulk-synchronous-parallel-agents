@@ -84,6 +84,26 @@ const OperatorPanel = (() => {
 
     const btnsDiv = document.createElement('div');
     btnsDiv.className = 'op-cell-btns';
+
+    const kfLabel = document.createElement('label');
+    kfLabel.className = 'kill-failed-label';
+    kfLabel.title = 'Kill failed agents after this step';
+    const kfCheck = document.createElement('input');
+    kfCheck.type = 'checkbox';
+    kfCheck.checked = op.kill_failed ?? true;
+    kfCheck.addEventListener('change', async e => {
+      e.stopPropagation();
+      op.kill_failed = kfCheck.checked;
+      await fetch(`/api/runs/${_runName}/operators/${op.name}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kill_failed: kfCheck.checked }),
+      });
+    });
+    kfLabel.appendChild(kfCheck);
+    kfLabel.appendChild(document.createTextNode(' kill failed'));
+    btnsDiv.appendChild(kfLabel);
+
     const runBtn = document.createElement('button');
     runBtn.className = 'run-btn';
     runBtn.dataset.name = op.name;
@@ -360,6 +380,15 @@ const OperatorPanel = (() => {
     _updateCellClasses();
   }
 
+  function relayout() {
+    for (const [name, editor] of Object.entries(_editors)) {
+      if (!(_collapsed[name] ?? true)) {
+        const div = _editorDivs[name];
+        if (div) _fitEditorHeight(editor, div);
+      }
+    }
+  }
+
   // ── Public API ────────────────────────────────────────────────────────────
   return {
     load,
@@ -371,6 +400,7 @@ const OperatorPanel = (() => {
     onQueueUpdated,
     onStepStarted,
     onStepDone,
+    relayout,
     getSelected: () => [..._selectedNames],
     getNames:    () => _operators.map(o => o.name),
   };
@@ -420,3 +450,8 @@ document.getElementById('btn-delete-op-cell').addEventListener('click', async ()
 });
 
 document.getElementById('btn-run-all').addEventListener('click', () => OperatorPanel.runAll());
+
+// Relayout Monaco editors whenever the operator panel changes size (handles both
+// the drag-handle resizer and browser window resize).
+new ResizeObserver(() => OperatorPanel.relayout())
+  .observe(document.getElementById('editor-panel'));

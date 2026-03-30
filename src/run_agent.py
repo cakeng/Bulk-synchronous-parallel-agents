@@ -203,41 +203,33 @@ async def run_agent(
 
 
 def _emit_status(status: str) -> None:
-    """Print a structured status event to stdout for the engine to relay to the UI."""
-    import sys
-    print(json.dumps({"type": "agent_status", "status": status}), flush=True, file=sys.stdout)
+    """Send a structured status event to the engine (TCP if available, stdout fallback)."""
+    from src import ipc
+    ipc.emit({"type": "agent_status", "status": status})
 
 
 def _emit_log(text: str) -> None:
-    """Print a log line to stdout so it appears in the agent log dialog."""
-    import sys
-    print(json.dumps({"type": "agent_log", "stream": "stdout", "text": text}), flush=True, file=sys.stdout)
+    """Send a log line to the engine (TCP if available, stdout fallback)."""
+    from src import ipc
+    ipc.emit({"type": "agent_log", "stream": "stdout", "text": text})
 
 
 async def _request_tool_slot(agent_rank: int) -> None:
     """Ask the engine for a tool-execution slot and suspend until granted.
 
-    Uses asyncio.to_thread so the worker's event loop remains free while
-    waiting — this is critical: blocking the event loop here would prevent
-    httpx from processing TCP events (keep-alive FINs from vLLM) and could
-    cause the next LLM call to hang on a silently-dead connection.
-
-    Only active when stdin is a pipe (i.e. running inside an engine subprocess).
-    Standalone / direct invocations (stdin is a tty) skip the handshake.
+    Uses the IPC channel (TCP when running under the engine, legacy stdin
+    handshake in standalone mode).  Either way the coroutine suspends
+    without blocking the event loop, so httpx keeps processing TCP events
+    from vLLM while we wait.
     """
-    import sys
-    if sys.stdin.isatty():
-        return
-    print(json.dumps({"type": "tool_slot_request", "agent_rank": agent_rank}), flush=True, file=sys.stdout)
-    await asyncio.to_thread(sys.stdin.readline)  # suspends coroutine, not the event loop
+    from src import ipc
+    await ipc.request_tool_slot(agent_rank)
 
 
 def _release_tool_slot(agent_rank: int) -> None:
     """Notify the engine that the tool-execution slot is no longer needed."""
-    import sys
-    if sys.stdin.isatty():
-        return
-    print(json.dumps({"type": "tool_slot_release", "agent_rank": agent_rank}), flush=True, file=sys.stdout)
+    from src import ipc
+    ipc.release_tool_slot(agent_rank)
 
 
 def _truncate(obj) -> str:

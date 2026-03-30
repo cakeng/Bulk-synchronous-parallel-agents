@@ -35,6 +35,10 @@ class RenameOperatorBody(BaseModel):
     new_name: str
 
 
+class PatchOperatorBody(BaseModel):
+    kill_failed: bool
+
+
 def _run_or_404(run_name: str):
     if not state_manager.has_run(run_name):
         raise HTTPException(404, f"Run '{run_name}' not found")
@@ -58,7 +62,8 @@ async def list_operators(run_name: str) -> dict:
         else:
             body = ""
             op_type = "base"
-        ops.append({"name": spec.name, "body": body, "op_type": op_type})
+        ops.append({"name": spec.name, "body": body, "op_type": op_type,
+                    "kill_failed": spec.kill_failed})
     return {"operators": ops}
 
 
@@ -169,10 +174,22 @@ async def reorder_operators(run_name: str, body: ReorderBody) -> dict:
     return {"order": [op.name for op in run.operator_list]}
 
 
+@router.patch("/{op_name}")
+async def patch_operator(run_name: str, op_name: str, body: PatchOperatorBody) -> dict:
+    run = _run_or_404(run_name)
+    spec = next((op for op in run.operator_list if op.name == op_name), None)
+    if spec is None:
+        raise HTTPException(404, f"Operator '{op_name}' not found in list")
+    spec.kill_failed = body.kill_failed
+    state_manager.save_operator_order(run_name)
+    return {"name": op_name, "kill_failed": spec.kill_failed}
+
+
 @router.post("/{op_name}/run")
 async def run_operator(run_name: str, op_name: str) -> dict:
     run = _run_or_404(run_name)
-    if not any(op.name == op_name for op in run.operator_list):
+    spec = next((op for op in run.operator_list if op.name == op_name), None)
+    if spec is None:
         raise HTTPException(404, f"Operator '{op_name}' not found in list")
-    await subprocess_manager.enqueue(run_name, op_name)
+    await subprocess_manager.enqueue(run_name, op_name, kill_failed=spec.kill_failed)
     return {"queued": op_name}

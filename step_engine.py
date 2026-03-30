@@ -95,6 +95,11 @@ async def main() -> None:
         action="store_true",
         help="Emit JSON events to stdout for the UI server to consume.",
     )
+    parser.add_argument(
+        "--kill-failed",
+        action="store_true",
+        help="Remove agents whose step_success=False after the operator completes.",
+    )
     args = parser.parse_args()
 
     if args.debug:
@@ -116,18 +121,72 @@ async def main() -> None:
     if args.verbose:
         _print_engine_overview(engine, run_name=args.run, verbose_level=args.verbose)
 
-    # Build UI callback if --ui-output is set
+    # Build UI callback if --ui-output is set.
+    #
+    # Events go over a TCP server so writes are never blocked by pipe-buffer
+    # limits.  subprocess_manager reads the port from the FIRST stdout line
+    # then connects; any events emitted before the client connects are buffered
+    # in memory and flushed immediately on connection.
+    #
+    # stdout/stderr pipes remain intact — subprocess_manager still captures
+    # them for debugging (user print() calls, Python tracebacks, etc.).
     ui_callback = None
+    _ui_server  = None
     if args.ui_output:
+        _ui_writer:  asyncio.StreamWriter | None = None
+        _ui_pending: list[dict] = []   # events buffered before client connects
+
+        async def _handle_ui_conn(
+            reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        ) -> None:
+            nonlocal _ui_writer
+            _ui_writer = writer
+            # Flush events that arrived before the client connected
+            for ev in _ui_pending:
+                writer.write((json.dumps(ev) + "\n").encode())
+            _ui_pending.clear()
+            try:
+                await writer.drain()
+            except Exception:
+                pass
+            try:
+                await reader.read()  # keep-alive until client disconnects
+            except Exception:
+                pass
+
+        _ui_server = await asyncio.start_server(_handle_ui_conn, "127.0.0.1", 0)
+        _ui_port   = _ui_server.sockets[0].getsockname()[1]
+
+        # First stdout line — subprocess_manager reads this to get the TCP port
+        sys.stdout.write(json.dumps({"type": "tcp_ready", "port": _ui_port}) + "\n")
+        sys.stdout.flush()
+
         async def ui_callback(event: dict) -> None:  # type: ignore[misc]
-            print(json.dumps(event), flush=True)
+            if _ui_writer is not None and not _ui_writer.is_closing():
+                _ui_writer.write((json.dumps(event) + "\n").encode())
+                # No drain() per call — asyncio transport flushes on next tick.
+            else:
+                _ui_pending.append(event)
 
     await engine.run_operator(
         str(op_path),
         verbose=args.verbose,
         debug=args.debug,
         ui_callback=ui_callback,
+        kill_failed=args.kill_failed,
     )
+
+    if _ui_server is not None:
+        # Drain and close the TCP writer so the client's readline() gets EOF.
+        if _ui_writer is not None and not _ui_writer.is_closing():
+            try:
+                await _ui_writer.drain()
+                _ui_writer.close()
+                await _ui_writer.wait_closed()
+            except Exception:
+                pass
+        _ui_server.close()
+        await _ui_server.wait_closed()
 
     if args.verbose:
         _print_engine_overview(engine, run_name=args.run, verbose_level=args.verbose)

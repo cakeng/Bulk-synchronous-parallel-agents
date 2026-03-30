@@ -541,7 +541,9 @@ const Tree = (() => {
 
     onStepStarted(preAgents, stepNum, opName) {
       _stepFailed     = false;
-      _queue          = [];
+      // Do NOT reset _queue here — queue_updated fires before step_started and
+      // already holds the correct remaining queue (running op already removed).
+      // Clearing here would erase the still-queued operators from the tree.
       _pendingAgents  = new Set(preAgents.map(a => a.agent_rank));
       _inProgress     = {};
       _failedAgents   = {};

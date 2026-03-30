@@ -23,11 +23,11 @@ _drain_tasks: dict[str, asyncio.Task] = {}
 # Public API
 # ---------------------------------------------------------------------------
 
-async def enqueue(run_name: str, operator_name: str) -> None:
+async def enqueue(run_name: str, operator_name: str, kill_failed: bool = False) -> None:
     if run_name not in _item_queues:
         _item_queues[run_name] = asyncio.Queue()
 
-    await _item_queues[run_name].put(operator_name)
+    await _item_queues[run_name].put({"name": operator_name, "kill_failed": kill_failed})
 
     run = state_manager.get_run(run_name)
     run.queue.append(operator_name)
@@ -129,15 +129,17 @@ async def _broadcast_and_log(run_name: str, event: dict) -> None:
 async def _drain_loop(run_name: str) -> None:
     q = _item_queues[run_name]
     while not q.empty():
-        operator_name = await q.get()
+        item = await q.get()
+        operator_name = item["name"]
+        kill_failed   = item.get("kill_failed", False)
         run = state_manager.get_run(run_name)
         if operator_name in run.queue:
             run.queue.remove(operator_name)
         await _emit_queue(run_name)
-        await _run_one(run_name, operator_name)
+        await _run_one(run_name, operator_name, kill_failed=kill_failed)
 
 
-async def _run_one(run_name: str, operator_name: str) -> None:
+async def _run_one(run_name: str, operator_name: str, kill_failed: bool = False) -> None:
     run = state_manager.get_run(run_name)
     run.running_operator = operator_name
     run.step_log = []    # clear previous step log
@@ -165,6 +167,8 @@ async def _run_one(run_name: str, operator_name: str) -> None:
 
     project_root = str(Path(__file__).resolve().parent.parent)
     cmd = [sys.executable, "step_engine.py", run_name, operator_name, "--ui-output"]
+    if kill_failed:
+        cmd.append("--kill-failed")
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -172,7 +176,7 @@ async def _run_one(run_name: str, operator_name: str) -> None:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=project_root,
-            limit=16 * 1024 * 1024,  # 16 MB — step_engine re-encodes worker events, so budget is larger
+            limit=256 * 1024 * 1024,  # 256 MB — stdout is debug-only in TCP mode
         )
         run.running_pid = proc.pid
 
@@ -180,33 +184,101 @@ async def _run_one(run_name: str, operator_name: str) -> None:
         engine_globals: dict = {}
         proc_stderr_lines: list[str] = []
 
-        async def read_stdout() -> None:
-            nonlocal post_agents, engine_globals
-            assert proc.stdout
-            async for raw in proc.stdout:
+        # Broadcast queue: decouple pipe-reading from WebSocket sends so a slow
+        # WebSocket client never backs up the pipe to step_engine.
+        _bcast_queue: asyncio.Queue = asyncio.Queue()
+
+        async def _drain_bcast_queue() -> None:
+            while True:
+                item = await _bcast_queue.get()
+                if item is None:  # sentinel: stop draining
+                    break
+                await _broadcast_and_log(run_name, item)
+
+        bcast_task = asyncio.create_task(_drain_bcast_queue())
+
+        # Scan stdout lines until we find {"type":"tcp_ready","port":N}.
+        # step_engine may emit colored log messages to stdout before this line
+        # (e.g. "No state file found"), so we skip non-JSON / non-tcp_ready lines.
+        _tcp_reader: asyncio.StreamReader | None = None
+        _tcp_writer: asyncio.StreamWriter | None = None
+        assert proc.stdout
+        try:
+            deadline = asyncio.get_event_loop().time() + 30.0
+            while True:
+                remaining = deadline - asyncio.get_event_loop().time()
+                if remaining <= 0:
+                    break
+                raw = await asyncio.wait_for(proc.stdout.readline(), timeout=remaining)
+                if not raw:
+                    break
                 line = raw.decode().rstrip()
                 try:
-                    event = json.loads(line)
-                    event["run"] = run_name
-                    if event.get("type") == "post_processing_done":
-                        post_agents = event.pop("agents", [])
-                        engine_globals = event.pop("globals", {})
-                    # Store agent_log and agent_status lines server-side for replay
-                    evt_type = event.get("type")
-                    rank = event.get("agent_rank")
-                    if rank is not None:
-                        if evt_type == "agent_log":
-                            stream = event.get("stream", "stdout")
-                            text   = event.get("text", "")
-                            prefix = "" if stream == "stdout" else "[stderr] "
-                            run.agent_logs.setdefault(rank, []).append(prefix + text)
-                        elif evt_type == "agent_status":
-                            status = event.get("status", "")
-                            if status:
-                                run.agent_logs.setdefault(rank, []).append(f"[status] {status}")
-                    await _broadcast_and_log(run_name, event)
+                    data = json.loads(line)
+                    if data.get("type") == "tcp_ready":
+                        _tcp_reader, _tcp_writer = await asyncio.open_connection(
+                            "127.0.0.1", data["port"],
+                            limit=8 * 1024 * 1024 * 1024,  # 8 GB — carries all agent states
+                        )
+                        break
                 except json.JSONDecodeError:
-                    await broadcast(run_name, {"type": "log_line", "run": run_name, "text": line})
+                    pass  # skip colored log lines printed before tcp_ready
+        except Exception as _tcp_err:
+            print(f"[subprocess_manager] TCP connect failed: {_tcp_err}", file=sys.stderr)
+
+        async def read_tcp() -> None:
+            """Primary event stream: JSON events from step_engine over TCP."""
+            nonlocal post_agents, engine_globals
+            if _tcp_reader is None:
+                return
+            try:
+                while True:
+                    try:
+                        raw = await _tcp_reader.readline()
+                    except Exception:
+                        break
+                    if not raw:
+                        break
+                    line = raw.decode().rstrip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                        event["run"] = run_name
+                        if event.get("type") == "post_processing_done":
+                            post_agents = event.pop("agents", [])
+                            engine_globals = event.pop("globals", {})
+                        # Store agent_log and agent_status lines server-side for replay
+                        evt_type = event.get("type")
+                        rank = event.get("agent_rank")
+                        if rank is not None:
+                            if evt_type == "agent_log":
+                                stream = event.get("stream", "stdout")
+                                text   = event.get("text", "")
+                                prefix = "" if stream == "stdout" else "[stderr] "
+                                run.agent_logs.setdefault(rank, []).append(prefix + text)
+                            elif evt_type == "agent_status":
+                                status = event.get("status", "")
+                                if status:
+                                    run.agent_logs.setdefault(rank, []).append(f"[status] {status}")
+                        await _bcast_queue.put(event)
+                    except json.JSONDecodeError:
+                        await _bcast_queue.put({"type": "log_line", "run": run_name, "text": line})
+            finally:
+                # Close our TCP writer so step_engine's keep-alive reader.read() gets
+                # EOF, unblocking _ui_server.wait_closed() and letting the process exit.
+                if _tcp_writer is not None and not _tcp_writer.is_closing():
+                    try:
+                        _tcp_writer.close()
+                    except Exception:
+                        pass
+
+        async def read_stdout() -> None:
+            """Capture remaining stdout for debugging (no event parsing in TCP mode)."""
+            async for raw in proc.stdout:  # type: ignore[union-attr]
+                line = raw.decode().rstrip()
+                if line:
+                    await _bcast_queue.put({"type": "log_line", "run": run_name, "text": f"[stdout] {line}"})
 
         async def read_stderr() -> None:
             assert proc.stderr
@@ -222,8 +294,31 @@ async def _run_one(run_name: str, operator_name: str) -> None:
                             "agent_rank": rank, "stream": "stderr", "text": line,
                         })
 
-        await asyncio.gather(read_stdout(), read_stderr())
-        await proc.wait()
+        try:
+            await asyncio.gather(read_tcp(), read_stdout(), read_stderr())
+            await proc.wait()
+        except Exception as exc:
+            # Stream read failed (e.g. line exceeded buffer limit).  The process
+            # may still be running; kill it to avoid a zombie.
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            run.running_pid = None
+            run.running_operator = None
+            await _bcast_queue.put(None)  # stop bcast_task before re-raising
+            await bcast_task
+            await _broadcast_and_log(run_name, {
+                "type": "step_failed",
+                "run": run_name,
+                "operator_name": operator_name,
+                "error": f"Stream read error: {exc}",
+            })
+            return
+
+        # Drain remaining broadcasts before moving on
+        await _bcast_queue.put(None)  # sentinel
+        await bcast_task
 
         run.running_pid = None
         run.running_operator = None
@@ -248,7 +343,18 @@ async def _run_one(run_name: str, operator_name: str) -> None:
                 "engine_state_uid": record.uid,
                 "record": state_manager.record_to_summary(record),
             })
-        elif proc.returncode != 0:
+        elif proc.returncode == 0:
+            # Step engine exited cleanly but reported zero surviving agents
+            # (e.g. kill_failed=True removed every agent that failed).
+            # We must still notify the UI so it doesn't hang in "Running" state.
+            await _broadcast_and_log(run_name, {
+                "type": "step_failed",
+                "run": run_name,
+                "operator_name": operator_name,
+                "error": "All agents were eliminated — kill_failed removed every agent that failed this step.",
+            })
+        else:
+            # proc.returncode != 0
             # Persist proc-level stderr into every agent's log buffer for replay.
             # (They were already broadcast live in read_stderr above.)
             if proc_stderr_lines:

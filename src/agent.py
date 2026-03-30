@@ -6,6 +6,21 @@ from typing import Any, Dict, List, Optional
 from openai import AsyncOpenAI
 
 
+class AgentState(dict):
+    """A plain dict with convenience helpers for use inside operator ``run()`` methods.
+
+    Passed as ``_local`` to every operator.  Behaves exactly like a dict for all
+    read/write/iteration operations, so existing code needs no changes.
+    """
+
+    def clear_history(self) -> None:
+        """Clear the chat context and call log, keeping all other agent variables."""
+        cfg = self.get("agent_config")
+        if cfg is not None:
+            cfg["context"] = []
+            cfg["call_log"] = []
+
+
 def compute_unique_id(state: dict) -> str:
     """Compute a stable 8-char base64 ID for an agent state (sha256, last 8 chars).
 

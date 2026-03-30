@@ -31,7 +31,8 @@ class EngineStateRecord:
 
 @dataclass
 class OperatorSpec:
-    name: str  # filename e.g. "step1.py"
+    name: str           # filename e.g. "step1.py"
+    kill_failed: bool = True
 
 
 @dataclass
@@ -142,9 +143,16 @@ def _load_operator_list(run_name: str) -> list[OperatorSpec]:
     order_file = run_dir / "operator_order.json"
     if order_file.exists():
         try:
-            names = json.loads(order_file.read_text())
-            return [OperatorSpec(name=n) for n in names
-                    if (run_dir / "operators" / n).exists()]
+            entries = json.loads(order_file.read_text())
+            specs = []
+            for entry in entries:
+                if isinstance(entry, str):
+                    name, kf = entry, False          # legacy format
+                else:
+                    name, kf = entry["name"], entry.get("kill_failed", False)
+                if (run_dir / "operators" / name).exists():
+                    specs.append(OperatorSpec(name=name, kill_failed=kf))
+            return specs
         except Exception:
             pass
     return [OperatorSpec(name=f.name)
@@ -158,7 +166,9 @@ def _load_operator_list(run_name: str) -> list[OperatorSpec]:
 def save_operator_order(run_name: str) -> None:
     run = _runs[run_name]
     order_file = RUNS_DIR / run_name / "operator_order.json"
-    order_file.write_text(json.dumps([op.name for op in run.operator_list]))
+    order_file.write_text(json.dumps(
+        [{"name": op.name, "kill_failed": op.kill_failed} for op in run.operator_list]
+    ))
 
 
 # ---------------------------------------------------------------------------

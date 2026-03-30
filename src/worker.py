@@ -12,9 +12,13 @@ Usage:
 import argparse
 import asyncio
 import importlib.util
+import json
+import os
 import pickle
 import sys
 
+from src.agent import AgentState
+from src import ipc
 from src.operator import (
     Operator, ForkOperator, KillOperator, SortOperator, ShuffleOperator,
 )
@@ -99,26 +103,42 @@ async def _main() -> None:
         state: dict = pickle.load(fh)
 
     # Split the flat state dict into the two operator arguments:
-    #   _local  — agent-specific variables
+    #   _local  — agent-specific variables (wrapped in AgentState for helpers)
     #   _global — engine-global variables (injected by the engine)
     _global_dict: dict = state.pop("engine_globals", {})
-    _local_dict:  dict = state
+    _local_dict = AgentState(state)
+    agent_rank  = int(_local_dict.get("agent_rank", 0))
 
-    operator  = _load_operator(args.operator)
-    op_type   = operator.OPERATOR_TYPE
+    # Connect to engine TCP server when spawned by the engine
+    _tcp_port = os.environ.get("BSA_ENGINE_TCP_PORT")
+    if _tcp_port:
+        try:
+            _tcp_reader, _tcp_writer = await asyncio.open_connection("127.0.0.1", int(_tcp_port))
+            # Identify this worker to the engine
+            _tcp_writer.write((json.dumps({"type": "hello", "agent_rank": agent_rank}) + "\n").encode())
+            await _tcp_writer.drain()
+            ipc.configure(_tcp_reader, _tcp_writer)
+        except Exception as _tcp_err:
+            print(f"[worker] TCP connect failed: {_tcp_err}", file=sys.stderr)
 
-    rv = await operator.run(_local_dict, _global_dict)
-    _validate_return(op_type, rv)
+    try:
+        operator  = _load_operator(args.operator)
+        op_type   = operator.OPERATOR_TYPE
 
-    # Rejoin so the engine can strip and merge engine_globals on return
-    result_state = {**_local_dict, "engine_globals": _global_dict}
-    output = {
-        "state":         result_state,
-        "return_value":  rv,
-        "operator_type": op_type,
-    }
-    with open(args.output, "wb") as fh:
-        pickle.dump(output, fh)
+        rv = await operator.run(_local_dict, _global_dict)
+        _validate_return(op_type, rv)
+
+        # Rejoin so the engine can strip and merge engine_globals on return
+        result_state = {**_local_dict, "engine_globals": _global_dict}
+        output = {
+            "state":         result_state,
+            "return_value":  rv,
+            "operator_type": op_type,
+        }
+        with open(args.output, "wb") as fh:
+            pickle.dump(output, fh)
+    finally:
+        await ipc.close()
 
 
 if __name__ == "__main__":
