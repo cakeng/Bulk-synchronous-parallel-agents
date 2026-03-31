@@ -87,6 +87,12 @@ async def clear_run(run_name: str) -> dict:
     workspaces_dir = RUNS_DIR / run_name / "workspaces"
     if workspaces_dir.exists():
         shutil.rmtree(workspaces_dir)
+    # Remove output symlinks (targets are gone)
+    outputs_dir = RUNS_DIR / run_name / "outputs"
+    if outputs_dir.exists():
+        for link in outputs_dir.glob("agent_*"):
+            if link.is_symlink():
+                link.unlink(missing_ok=True)
     state_manager.clear_run(run_name)
     await broadcast_all({"type": "runs_updated", "runs": state_manager.get_all_run_names()})
     return {"cleared": run_name}

@@ -2,7 +2,7 @@
 'use strict';
 
 const Tree = (() => {
-  const COL_W = 150, STEP_H = 64, NODE_W = 120, NODE_H = 44;
+  const COL_W = 110, STEP_H = 64, NODE_W = 80, NODE_H = 44;
   const PAD_TOP = 8, PAD_LEFT = 110;
   const MMAP_W = 160, MMAP_H = 120;
 

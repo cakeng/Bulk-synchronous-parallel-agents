@@ -146,7 +146,13 @@ const BottomPanels = (() => {
       container.appendChild(_makeBubble(msg.role, msg.role, msg.content || ''));
     });
 
-    requestAnimationFrame(() => { panel.scrollTop = panel.scrollHeight; });
+    requestAnimationFrame(() => {
+      const msgs = container.querySelectorAll('.chat-msg');
+      if (msgs.length > 0) {
+        const last = msgs[msgs.length - 1];
+        panel.scrollTop = last.offsetTop - container.offsetTop;
+      }
+    });
   }
 
   function _makeBubble(cssClass, roleLabel, content) {

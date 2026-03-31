@@ -108,6 +108,10 @@ function handleWsEvent(runName, msg) {
     case 'runs_updated':
       App.runs = msg.runs;
       renderTabs();
+      // Re-initialise the tree so cleared state doesn't linger in the DOM.
+      if (App.activeRun && msg.runs.includes(App.activeRun)) {
+        loadRunData(App.activeRun);
+      }
       break;
 
     case 'step_started':

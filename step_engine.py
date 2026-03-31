@@ -188,10 +188,36 @@ async def main() -> None:
         _ui_server.close()
         await _ui_server.wait_closed()
 
+    _update_output_symlinks(engine, run_dir)
+
     if args.verbose:
         _print_engine_overview(engine, run_name=args.run, verbose_level=args.verbose)
 
     engine.save_state(state_file)
+
+
+def _update_output_symlinks(engine: Engine, run_dir: Path) -> None:
+    """Maintain outputs/ as human-readable symlinks: agent_<rank> → workspaces/<uid>."""
+    outputs_dir = run_dir / "outputs"
+    outputs_dir.mkdir(exist_ok=True)
+
+    # Remove all existing agent_* symlinks so stale ranks don't linger.
+    for link in outputs_dir.glob("agent_*"):
+        if link.is_symlink():
+            link.unlink()
+
+    for agent in engine.agents:
+        ws = agent.get("workspace_dir")
+        if not ws:
+            continue
+        ws_path = Path(ws)
+        # Use a path relative to outputs_dir so the tree is portable.
+        try:
+            target = Path("..") / ws_path.relative_to(run_dir)
+        except ValueError:
+            target = ws_path  # fallback to absolute if outside run_dir
+        link = outputs_dir / f"agent_{agent['agent_rank']}"
+        link.symlink_to(target)
 
 
 def _print_engine_overview(engine: Engine, run_name: str, verbose_level: int = 1) -> None:

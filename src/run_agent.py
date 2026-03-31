@@ -93,11 +93,11 @@ async def run_agent(
     agent_config  = agent_state["agent_config"]
     workspace_dir = agent_state.get("workspace_dir")
     agent_rank    = int(agent_state.get("agent_rank", 0))
-    llm_timeout   = float(agent_config.get("timeout", 300.0))
+    llm_timeout   = float(agent_config.get("timeout", 600.0))
     client = AsyncOpenAI(
         base_url=agent_config["base_url"],
         api_key=agent_config["api_key"],
-        timeout=agent_config.get("timeout", 300.0),
+        timeout=agent_config.get("timeout", 600.0),
     )
     model       = agent_config["model"]
     max_retries = agent_config.get("max_retries", max_retries)
@@ -245,7 +245,7 @@ async def _agentic_loop(
     workspace_dir: Optional[str],
     tokens_used: Dict[str, int],
     agent_rank: int = 0,
-    llm_timeout: float = 300.0,
+    llm_timeout: float = 600.0,
 ) -> Tuple[str, List[str], List[Tuple], List[Dict]]:
     """Call the model in a loop, executing tool calls until a text response arrives.
 
