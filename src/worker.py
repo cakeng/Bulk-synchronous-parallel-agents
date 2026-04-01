@@ -137,6 +137,15 @@ async def _main() -> None:
         }
         with open(args.output, "wb") as fh:
             pickle.dump(output, fh)
+    except Exception:
+        import traceback
+        tb = traceback.format_exc()
+        # Emit the full traceback via IPC so it appears in the agent log panel,
+        # then also print to stderr as a fallback.
+        for line in tb.splitlines():
+            ipc.emit({"type": "agent_log", "stream": "stderr", "text": line})
+        print(tb, file=sys.stderr, flush=True)
+        raise
     finally:
         await ipc.close()
 

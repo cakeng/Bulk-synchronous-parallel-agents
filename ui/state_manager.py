@@ -244,6 +244,8 @@ def _slim_agents(agents: list[dict]) -> list[dict]:
         slim = {k: v for k, v in a.items() if k in slim_keys}
         if a.get("agent_killed"):
             slim["agent_killed"] = True
+        if a.get("agent_failed"):
+            slim["agent_failed"] = True
         if "shuffle_output" in a and isinstance(a["shuffle_output"], dict):
             slim["shuffle_sources"] = sorted(a["shuffle_output"].keys())
         result.append(slim)

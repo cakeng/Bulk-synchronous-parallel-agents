@@ -126,9 +126,6 @@ async def clear_run(run_name: str) -> dict:
     if states_dir.exists():
         for f in states_dir.glob("*.pt"):
             f.unlink(missing_ok=True)
-    # Also remove legacy engine_state.pt
-    legacy = RUNS_DIR / run_name / "engine_state.pt"
-    legacy.unlink(missing_ok=True)
     # Delete workspace directories
     workspaces_dir = RUNS_DIR / run_name / "workspaces"
     if workspaces_dir.exists():

@@ -206,6 +206,7 @@ async def _run_one(run_name: str, operator_name: str, kill_failed: bool = False)
         post_agents: list[dict] = []
         engine_killed_agents: list[dict] = []
         engine_globals: dict = {}
+        failed_ranks: set = set()
         proc_stderr_lines: list[str] = []
 
         # Broadcast queue: decouple pipe-reading from WebSocket sends so a slow
@@ -280,6 +281,9 @@ async def _run_one(run_name: str, operator_name: str, kill_failed: bool = False)
                             run.agent_pids[rank] = event.get("pid")
                             continue  # internal event — don't broadcast
                         if rank is not None and evt_type == "agent_completed":
+                            run.agent_pids.pop(rank, None)
+                        if rank is not None and evt_type == "agent_failed":
+                            failed_ranks.add(rank)
                             run.agent_pids.pop(rank, None)
                         if rank is not None:
                             if evt_type == "agent_log":
@@ -357,23 +361,29 @@ async def _run_one(run_name: str, operator_name: str, kill_failed: bool = False)
             # If any agents were killed by the user this step, move them from
             # active to the killed list in engine_state.pt (so next step skips them).
             if run.killed_ranks:
-                state_file = RUNS_DIR / run_name / "engine_state.pt"
-                if state_file.exists():
+                states_dir = RUNS_DIR / run_name / "engine_states"
+                pts = sorted(states_dir.glob("*.pt")) if states_dir.exists() else []
+                state_file = pts[-1] if pts else None
+                if state_file:
                     try:
                         import torch as _torch
                         data = _torch.load(state_file, weights_only=False)
+                        # Handle both engine format and UI snapshot format
+                        agents_key = "full_agents" if "full_agents" in data and "agents" not in data else "agents"
                         newly_killed, still_active = [], []
-                        for a in data.get("agents", []):
+                        for a in data.get(agents_key, []):
                             if a.get("agent_rank") in run.killed_ranks:
                                 a["agent_killed"] = True
                                 newly_killed.append(a)
                             else:
                                 still_active.append(a)
-                        data["agents"] = still_active
-                        data["killed_agents"] = data.get("killed_agents", []) + newly_killed
+                        data[agents_key] = still_active + newly_killed
+                        if agents_key == "agents":
+                            data["killed_agents"] = data.get("killed_agents", []) + newly_killed
+                            data[agents_key] = still_active
                         _torch.save(data, state_file)
                     except Exception as _patch_err:
-                        print(f"[subprocess_manager] Failed to patch engine_state.pt: {_patch_err}", file=sys.stderr)
+                        print(f"[subprocess_manager] Failed to patch engine state: {_patch_err}", file=sys.stderr)
 
             # Identify newly-killed agents using pre-step state (by rank → uid),
             # so we are immune to any reindexing the engine did after removing the
@@ -401,7 +411,28 @@ async def _run_one(run_name: str, operator_name: str, kill_failed: bool = False)
                     post_agents = [a for a in post_agents if a.get("agent_rank") not in run.killed_ranks]
                 post_agents.extend(newly_killed_entries)
 
-            post_agents.sort(key=lambda a: (1 if a.get("agent_killed") else 0, a.get("agent_rank", 0)))
+            # Preserve failed agents from pre-step state with agent_failed=True,
+            # immune to engine reindexing (same pattern as killed agents).
+            if failed_ranks:
+                pre_by_rank = {a.get("agent_rank"): a for a in pre_agents}
+                failed_uids: set = set()
+                newly_failed_entries: list = []
+                for rank in failed_ranks:
+                    orig = pre_by_rank.get(rank)
+                    if orig:
+                        fa = dict(orig)
+                        fa["agent_failed"] = True
+                        newly_failed_entries.append(fa)
+                        uid = orig.get("unique_id")
+                        if uid:
+                            failed_uids.add(uid)
+                if failed_uids:
+                    post_agents = [a for a in post_agents if a.get("unique_id") not in failed_uids]
+                else:
+                    post_agents = [a for a in post_agents if a.get("agent_rank") not in failed_ranks]
+                post_agents.extend(newly_failed_entries)
+
+            post_agents.sort(key=lambda a: (1 if (a.get("agent_killed") or a.get("agent_failed")) else 0, a.get("agent_rank", 0)))
 
             record = state_manager.add_engine_state_record(
                 run_name=run_name,
@@ -426,11 +457,14 @@ async def _run_one(run_name: str, operator_name: str, kill_failed: bool = False)
             # Step engine exited cleanly but reported zero surviving agents
             # (e.g. kill_failed=True removed every agent that failed).
             # We must still notify the UI so it doesn't hang in "Running" state.
+            elim_msg = "All agents were eliminated — kill_failed removed every agent that failed this step."
+            if proc_stderr_lines:
+                elim_msg = "\n".join(proc_stderr_lines).strip() + "\n\n" + elim_msg
             await _broadcast_and_log(run_name, {
                 "type": "step_failed",
                 "run": run_name,
                 "operator_name": operator_name,
-                "error": "All agents were eliminated — kill_failed removed every agent that failed this step.",
+                "error": elim_msg,
             })
         else:
             # proc.returncode != 0

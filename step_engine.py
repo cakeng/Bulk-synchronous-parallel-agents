@@ -20,7 +20,7 @@ Run directory layout
 --------------------
     runs/
       <run_name>/
-        engine_state.pt   ← persisted agent state
+        engine_states/    ← persisted agent state snapshots (one .pt per step)
         operators/        ← operator files for this run
 
 Each invocation corresponds to one "cell" in the notebook-style execution model:
@@ -31,6 +31,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 from src.engine import Engine
@@ -46,6 +47,15 @@ def resolve_run(run_name: str) -> Path:
         (run_dir / "operators").mkdir(parents=True)
         log.print_engine(f"[step_engine] Created new run '{run_name}' at '{run_dir}/'.")
     return run_dir
+
+
+def latest_engine_state(run_dir: Path) -> Path | None:
+    """Return the most recent .pt snapshot from run_dir/engine_states/, or None."""
+    states_dir = run_dir / "engine_states"
+    if not states_dir.exists():
+        return None
+    pts = sorted(states_dir.glob("*.pt"))
+    return pts[-1] if pts else None
 
 
 def resolve_operator(op_arg: str, run_dir: Path) -> Path:
@@ -107,13 +117,13 @@ async def main() -> None:
 
     run_dir   = resolve_run(args.run)
     op_path   = resolve_operator(args.operator, run_dir)
-    state_file = str(run_dir / "engine_state.pt")
 
     engine = Engine()
     engine.workspace_base = run_dir / "workspaces"
 
-    if os.path.isfile(state_file):
-        engine.load_state(state_file)
+    latest = latest_engine_state(run_dir)
+    if latest:
+        engine.load_state(str(latest))
     else:
         log.print_engine(f"[step_engine] No state file found. Initializing fresh engine for run '{args.run}'.")
         engine.initialize()
@@ -193,7 +203,14 @@ async def main() -> None:
     if args.verbose:
         _print_engine_overview(engine, run_name=args.run, verbose_level=args.verbose)
 
-    engine.save_state(state_file)
+    # When run via the UI (--ui-output), subprocess_manager saves to engine_states/.
+    # When run directly from CLI, we save ourselves.
+    if not args.ui_output:
+        states_dir = run_dir / "engine_states"
+        states_dir.mkdir(exist_ok=True)
+        step_num  = engine.globals.get("step", 0)
+        save_path = states_dir / f"{args.run}_{step_num:04d}_engine_state_{int(time.time())}.pt"
+        engine.save_state(str(save_path))
 
 
 def _update_output_symlinks(engine: Engine, run_dir: Path) -> None:

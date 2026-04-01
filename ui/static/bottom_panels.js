@@ -267,7 +267,7 @@ const BottomPanels = (() => {
       _liveRunning   = new Set();
       _liveCompleted = {};
       _liveFailed    = {};
-      _liveTotal     = preAgents.length;
+      _liveTotal     = preAgents.filter(a => !a.agent_killed && !a.agent_failed).length;
       if (_viewingRunningStep) renderLiveGlobals();
     },
 

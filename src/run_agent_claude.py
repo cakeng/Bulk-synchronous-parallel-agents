@@ -109,16 +109,38 @@ async def run_agent_claude(
             "Please respond with only a corrected JSON object."
         )
 
-        raw, thinking, tool_calls, new_sid, cost, messages = await _invoke_claude(
-            prompt=send_prompt,
-            session_id=session_id,
-            workspace_dir=workspace_dir,
-            model=model,
-            base_url=base_url,
-            api_key=api_key,
-            extra_flags=extra_flags,
-            ipc=ipc,
-        )
+        try:
+            raw, thinking, tool_calls, new_sid, cost, messages = await _invoke_claude(
+                prompt=send_prompt,
+                session_id=session_id,
+                workspace_dir=workspace_dir,
+                model=model,
+                base_url=base_url,
+                api_key=api_key,
+                extra_flags=extra_flags,
+                ipc=ipc,
+            )
+        except RuntimeError:
+            # If we had a session_id and it caused the failure (e.g. stale/expired
+            # session from a previous machine), clear it and retry without --resume.
+            if session_id:
+                ipc.emit({"type": "agent_log", "stream": "stderr",
+                          "text": f"[claude] session {session_id!r} failed — retrying as new session"})
+                session_id = None
+                agent_state["claude_session_id"] = None
+                agent_config["context"] = []
+                raw, thinking, tool_calls, new_sid, cost, messages = await _invoke_claude(
+                    prompt=send_prompt,
+                    session_id=None,
+                    workspace_dir=workspace_dir,
+                    model=model,
+                    base_url=base_url,
+                    api_key=api_key,
+                    extra_flags=extra_flags,
+                    ipc=ipc,
+                )
+            else:
+                raise
 
         if new_sid:
             session_id = new_sid

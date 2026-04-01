@@ -59,13 +59,26 @@ class Engine:
 
     def load_state(self, path: str = DEFAULT_STATE_FILE) -> None:
         data = torch.load(path, weights_only=False)
+        # Support both engine format (key "agents") and UI snapshot format (key "full_agents").
+        if "full_agents" in data and "agents" not in data:
+            all_agents = data["full_agents"]
+            active     = [a for a in all_agents if not a.get("agent_killed") and not a.get("agent_failed")]
+            dead       = [a for a in all_agents if a.get("agent_killed") or a.get("agent_failed")]
+            agent_states    = active
+            killed_states   = dead
+            globals_        = data.get("globals", {})
+        else:
+            agent_states    = data["agents"]
+            killed_states   = data.get("killed_agents", [])
+            globals_        = data.get("globals", {})
+
         self.agents = []
-        for agent_state in data["agents"]:
+        for agent_state in agent_states:
             agent = Agent(agent_rank=agent_state["agent_rank"])
             agent.set_state(agent_state)
             self.agents.append(agent)
-        self.killed_agents = data.get("killed_agents", [])
-        self.globals = data.get("globals", {"step": 0, "agent_size": len(self.agents)})
+        self.killed_agents = killed_states
+        self.globals = globals_ or {"step": 0, "agent_size": len(self.agents)}
         if self.killed_agents:
             log.print_engine(
                 f"[Engine] Loaded {len(self.agents)} active agent(s) + "
