@@ -162,6 +162,26 @@ html, body { height: 100%; overflow: hidden; font-family: system-ui, sans-serif;
   font-size: 11px;
 }
 #delete-states-btn:hover { background: #7a2020; }
+#kill-agent-btn {
+  background: #5a2020;
+  border: 1px solid #f44747;
+  color: #f44747;
+  padding: 2px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 11px;
+}
+#kill-agent-btn:hover { background: #7a2020; }
+#halfbake-btn {
+  background: #4a3010;
+  border: 1px solid #c57a00;
+  color: #c57a00;
+  padding: 2px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 11px;
+}
+#halfbake-btn:hover { background: #6a4a10; }
 
 .op-list-section { padding: 4px 0; }
 .op-list-section-label {
@@ -241,12 +261,18 @@ html, body { height: 100%; overflow: hidden; font-family: system-ui, sans-serif;
 .tree-node rect:hover { fill: #3a5f8a; }
 .tree-node.selected rect { stroke: #ffd700; stroke-width: 2; }
 .tree-node.running rect { fill: #2d3a1a; stroke: #b5cea8; stroke-dasharray: 4,2; }
-.tree-node.running-pending { opacity: 0.35; }
+.tree-node.running-pending { opacity: 0.55; cursor: pointer; }
 .tree-node.running-pending rect { fill: #1e1e1e; stroke: #555; stroke-dasharray: 4,2; }
+.tree-node.running-pending:hover { opacity: 0.85; }
+.tree-node.selected-running { opacity: 1; }
+.tree-node.selected-running rect { stroke: #ff6b35; stroke-width: 2.5; fill: #2a1505; }
+.tree-node.selected-done rect { stroke: #ffd700; stroke-width: 2.5; }
 .tree-node.killed { opacity: 0.4; }
 .tree-node.killed rect { fill: #3a1a1a; stroke: #f44747; }
 .tree-node.agent-failed { opacity: 0.6; cursor: pointer; }
 .tree-node.agent-failed rect { fill: #3a0808; stroke: #f44747; stroke-width: 2; }
+.tree-node.user-killed { opacity: 0.55; cursor: pointer; }
+.tree-node.user-killed rect { fill: #1e1010; stroke: #c57a00; stroke-width: 1.5; stroke-dasharray: 4,2; }
 .tree-node.agent-failed text { fill: #f44747 !important; }
 .tree-node.queued { opacity: 0.35; }
 .tree-node.queued rect { fill: #1a1a1a; stroke: #444; stroke-dasharray: 4,2; }

@@ -16,6 +16,7 @@
       <button class="menu-btn" id="menu-btn">☰</button>
       <div class="dropdown" id="menu-dropdown">
         <div class="dropdown-item" id="menu-create">Create Run…</div>
+        <div class="dropdown-item" id="menu-copy">Copy Run…</div>
         <div class="dropdown-item" id="menu-clear">Clear Run…</div>
         <div class="dropdown-item" id="menu-delete">Delete Run…</div>
       </div>
@@ -33,6 +34,8 @@
         Execution Tree
         <span id="tree-status"></span>
         <button id="delete-states-btn">Delete Step</button>
+        <button id="kill-agent-btn" style="display:none">Kill Agent</button>
+        <button id="halfbake-btn" style="display:none">Half-bake Step</button>
       </div>
       <div class="panel-body" id="tree-body">
         <div id="tree-svg-container">
@@ -116,6 +119,16 @@
   <div class="dialog-btns">
     <button onclick="document.getElementById('dlg-create-run').close()">Cancel</button>
     <button class="primary" id="dlg-create-run-ok">Create</button>
+  </div>
+</dialog>
+
+<dialog id="dlg-copy-run">
+  <h3>Copy Run</h3>
+  <label>New run name</label>
+  <input id="dlg-copy-run-name" type="text" placeholder="my_experiment_copy">
+  <div class="dialog-btns">
+    <button onclick="document.getElementById('dlg-copy-run').close()">Cancel</button>
+    <button class="primary" id="dlg-copy-run-ok">Copy</button>
   </div>
 </dialog>
 

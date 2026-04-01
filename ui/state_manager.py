@@ -47,6 +47,10 @@ class RunState:
     step_log: list[dict] = field(default_factory=list)
     # Per-agent stdout/stderr lines for the current step (rank -> [lines])
     agent_logs: dict[int, list[str]] = field(default_factory=dict)
+    # Worker subprocess PIDs for the current step (rank -> pid)
+    agent_pids: dict[int, int] = field(default_factory=dict)
+    # Agent ranks killed by the user during the current step
+    killed_ranks: set = field(default_factory=set)
 
 
 _runs: dict[str, RunState] = {}
@@ -79,6 +83,14 @@ def create_run(run_name: str) -> RunState:
 
 def delete_run(run_name: str) -> None:
     _runs.pop(run_name, None)
+
+
+def reload_run(run_name: str) -> None:
+    """Reload engine states and operator list from disk for an existing run."""
+    run = _runs.get(run_name)
+    if run:
+        run.engine_state_list = _load_engine_states(run_name)
+        run.operator_list = _load_operator_list(run_name)
 
 
 def clear_run(run_name: str) -> None:
@@ -230,6 +242,8 @@ def _slim_agents(agents: list[dict]) -> list[dict]:
     result = []
     for a in agents:
         slim = {k: v for k, v in a.items() if k in slim_keys}
+        if a.get("agent_killed"):
+            slim["agent_killed"] = True
         if "shuffle_output" in a and isinstance(a["shuffle_output"], dict):
             slim["shuffle_sources"] = sorted(a["shuffle_output"].keys())
         result.append(slim)

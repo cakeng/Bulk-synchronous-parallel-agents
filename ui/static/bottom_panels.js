@@ -10,6 +10,13 @@ const BottomPanels = (() => {
   let _showThinking  = false;
   let _showToolCalls = false;
 
+  // Live in-progress step state
+  let _viewingRunningStep = false;
+  let _liveRunning   = new Set();   // agent_rank
+  let _liveCompleted = {};          // rank → state dict
+  let _liveFailed    = {};          // rank → error string
+  let _liveTotal     = 0;           // pre-step agent count
+
   const VAL_MAX = 16; // max chars to show inline for a variable value
 
   // ── Load a specific engine state by uid ──────────────────────────────────
@@ -22,10 +29,33 @@ const BottomPanels = (() => {
     renderAgentState();
   }
 
+  function _addGlobalsRow(tbl, key, value, style) {
+    const tr = document.createElement('tr');
+    if (style) tr.style.cssText = style;
+    tr.innerHTML = `<td>${escHtml(key)}</td><td>${escHtml(String(value))}</td>`;
+    tbl.appendChild(tr);
+  }
+
+  function renderLiveGlobals() {
+    const tbl = document.getElementById('globals-table');
+    tbl.innerHTML = '';
+    const nCompleted = Object.keys(_liveCompleted).length;
+    const nFailed    = Object.keys(_liveFailed).length;
+    const nRunning   = _liveRunning.size;
+    _addGlobalsRow(tbl, 'running',   nRunning,   nRunning   ? 'color:#4ec9b0' : '');
+    _addGlobalsRow(tbl, 'completed', nCompleted, nCompleted ? 'color:#b5cea8' : '');
+    _addGlobalsRow(tbl, 'failed',    nFailed,    nFailed    ? 'color:#f44747' : '');
+    _addGlobalsRow(tbl, 'total',     _liveTotal, '');
+    document.getElementById('op-code-display').textContent = '';
+  }
+
   function renderEngineState() {
     if (!_curFull) return;
     const tbl = document.getElementById('globals-table');
     tbl.innerHTML = '';
+    // Agent counts derived from the saved state
+    const agents = _curFull.agents || [];
+    _addGlobalsRow(tbl, 'agents', agents.length, 'color:#b5cea8');
     for (const [k, v] of Object.entries(_curFull.globals || {})) {
       const tr = document.createElement('tr');
       tr.innerHTML = `<td>${escHtml(k)}</td><td>${escHtml(JSON.stringify(v))}</td>`;
@@ -173,6 +203,7 @@ const BottomPanels = (() => {
   }
 
   function clearPanels() {
+    _viewingRunningStep = false;
     document.getElementById('globals-table').innerHTML = '';
     document.getElementById('agent-vars-table').innerHTML = '';
     document.getElementById('chat-context').innerHTML = '';
@@ -201,6 +232,11 @@ const BottomPanels = (() => {
       _records = [...records];  // own copy — don't share with Tree
       _curFull = null;
       _selectedAgent = 0;
+      _viewingRunningStep = false;
+      _liveRunning   = new Set();
+      _liveCompleted = {};
+      _liveFailed    = {};
+      _liveTotal     = 0;
       clearPanels();
     },
 
@@ -210,11 +246,62 @@ const BottomPanels = (() => {
 
     selectState(uid, agentRank) {
       _selectedAgent = agentRank ?? 0;
+      if (uid === '__running__') {
+        _curFull = null;
+        _viewingRunningStep = true;
+        renderLiveGlobals();
+        // If a specific completed agent is requested, show its state
+        if (agentRank !== null && _liveCompleted[agentRank]) {
+          renderAgent(_liveCompleted[agentRank]);
+        } else {
+          document.getElementById('agent-vars-table').innerHTML = '';
+          document.getElementById('chat-context').innerHTML = '';
+        }
+        return;
+      }
+      _viewingRunningStep = false;
       loadByUid(uid);
     },
 
+    onStepStarted(preAgents) {
+      _liveRunning   = new Set();
+      _liveCompleted = {};
+      _liveFailed    = {};
+      _liveTotal     = preAgents.length;
+      if (_viewingRunningStep) renderLiveGlobals();
+    },
+
+    onAgentStarted(agentRank) {
+      _liveRunning.add(agentRank);
+      if (_viewingRunningStep) renderLiveGlobals();
+    },
+
     onAgentCompleted(agentRank, state) {
+      _liveRunning.delete(agentRank);
+      _liveCompleted[agentRank] = state;
+      if (_viewingRunningStep) {
+        renderLiveGlobals();
+        // Auto-update agent panel if this agent is selected
+        if (_selectedAgent === agentRank) renderAgent(state);
+      }
+    },
+
+    onAgentFailed(agentRank, error) {
+      _liveRunning.delete(agentRank);
+      _liveFailed[agentRank] = error;
+      if (_viewingRunningStep) renderLiveGlobals();
+    },
+
+    selectLiveAgent(agentRank, state) {
+      if (agentRank === null || state === null) {
+        if (_viewingRunningStep) {
+          document.getElementById('agent-vars-table').innerHTML = '';
+          document.getElementById('chat-context').innerHTML = '';
+        }
+        return;
+      }
       _selectedAgent = agentRank;
+      _curFull = null;  // no persisted engine state backing this view
       renderAgent(state);
     },
   };

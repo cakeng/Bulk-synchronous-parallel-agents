@@ -7,6 +7,7 @@ import heapq
 import json
 import os
 import pickle
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -38,6 +39,7 @@ class Engine:
 
     def __init__(self) -> None:
         self.agents: List[Agent] = []
+        self.killed_agents: list = []  # user-killed agent states — persisted but never executed
         self.globals: Dict[str, Any] = {"step": 0}
         self.workspace_base: Path | None = None  # set by step_engine before initialize()
         # Tool-slot semaphore state — re-initialised at the start of every run_operator call
@@ -62,16 +64,25 @@ class Engine:
             agent = Agent(agent_rank=agent_state["agent_rank"])
             agent.set_state(agent_state)
             self.agents.append(agent)
+        self.killed_agents = data.get("killed_agents", [])
         self.globals = data.get("globals", {"step": 0, "agent_size": len(self.agents)})
-        log.print_engine(
-            f"[Engine] Loaded {len(self.agents)} agent(s) from '{path}'  "
-            f"[step={self.globals.get('step', 0)}]."
-        )
+        if self.killed_agents:
+            log.print_engine(
+                f"[Engine] Loaded {len(self.agents)} active agent(s) + "
+                f"{len(self.killed_agents)} killed agent(s) from '{path}'  "
+                f"[step={self.globals.get('step', 0)}]."
+            )
+        else:
+            log.print_engine(
+                f"[Engine] Loaded {len(self.agents)} agent(s) from '{path}'  "
+                f"[step={self.globals.get('step', 0)}]."
+            )
 
     def save_state(self, path: str = DEFAULT_STATE_FILE) -> None:
         data = {
-            "agents":  [a.get_state() for a in self.agents],
-            "globals": self.globals,
+            "agents":         [a.get_state() for a in self.agents],
+            "killed_agents":  self.killed_agents,
+            "globals":        self.globals,
         }
         torch.save(data, path)
         log.print_engine(f"[Engine] State saved to '{path}'.")
@@ -305,8 +316,9 @@ class Engine:
         if ui_callback:
             await ui_callback({
                 "type": "post_processing_done",
-                "agents": [a.get_state() for a in self.agents],
-                "globals": dict(self.globals),
+                "agents":        [a.get_state() for a in self.agents],
+                "killed_agents": list(self.killed_agents),
+                "globals":       dict(self.globals),
             })
 
     # ------------------------------------------------------------------
@@ -359,6 +371,8 @@ class Engine:
                 env=worker_env,
                 limit=8 * 1024 * 1024,
             )
+            if ui_callback:
+                await ui_callback({"type": "worker_pid", "agent_rank": agent_rank, "pid": proc.pid})
 
             stderr_lines: list[str] = []
 
@@ -487,6 +501,13 @@ class Engine:
         uid = agent["unique_id"]
         ws = self.workspace_base / uid
         ws.mkdir(parents=True, exist_ok=True)
+        # Initialise a git repo so Claude Code treats this as an isolated project
+        # rather than walking up to find the BSA repo root.
+        if not (ws / ".git").exists():
+            subprocess.run(
+                ["git", "init"],
+                cwd=ws, capture_output=True, check=False,
+            )
         agent["workspace_dir"] = str(ws)
         agent["agent_config"]["tools"] = _tools.build_tool_schemas()
 

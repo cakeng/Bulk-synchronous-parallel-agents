@@ -19,6 +19,10 @@ class CreateRunBody(BaseModel):
     name: str
 
 
+class CopyRunBody(BaseModel):
+    new_name: str
+
+
 @router.get("")
 async def list_runs() -> dict:
     return {"runs": state_manager.get_all_run_names()}
@@ -34,6 +38,24 @@ async def create_run(body: CreateRunBody) -> dict:
     state_manager.create_run(name)
     await broadcast_all({"type": "runs_updated", "runs": state_manager.get_all_run_names()})
     return {"name": name}
+
+
+@router.post("/{run_name}/copy")
+async def copy_run(run_name: str, body: CopyRunBody) -> dict:
+    if not state_manager.has_run(run_name):
+        raise HTTPException(404, f"Run '{run_name}' not found")
+    new_name = body.new_name.strip()
+    if not new_name or "/" in new_name:
+        raise HTTPException(400, "Invalid run name")
+    if state_manager.has_run(new_name):
+        raise HTTPException(409, f"Run '{new_name}' already exists")
+    src_dir = RUNS_DIR / run_name
+    dst_dir = RUNS_DIR / new_name
+    shutil.copytree(src_dir, dst_dir)
+    state_manager.create_run(new_name)
+    state_manager.reload_run(new_name)
+    await broadcast_all({"type": "runs_updated", "runs": state_manager.get_all_run_names()})
+    return {"name": new_name}
 
 
 @router.delete("/{run_name}")
@@ -68,6 +90,30 @@ async def kill_run(run_name: str) -> dict:
         raise HTTPException(404, f"Run '{run_name}' not found")
     await subprocess_manager.kill_current(run_name)
     return {"killed": run_name}
+
+
+@router.post("/{run_name}/kill_agent/{agent_rank}")
+async def kill_agent(run_name: str, agent_rank: int) -> dict:
+    if not state_manager.has_run(run_name):
+        raise HTTPException(404, f"Run '{run_name}' not found")
+    found = await subprocess_manager.kill_agent(run_name, agent_rank)
+    if not found:
+        raise HTTPException(404, f"No running worker found for agent {agent_rank}")
+    return {"killed_agent": agent_rank}
+
+
+@router.post("/{run_name}/halfbake")
+async def halfbake_step(run_name: str) -> dict:
+    """Kill all still-running agent workers; already-completed agents form the step result."""
+    if not state_manager.has_run(run_name):
+        raise HTTPException(404, f"Run '{run_name}' not found")
+    run = state_manager.get_run(run_name)
+    ranks = list(run.agent_pids.keys())
+    if not ranks:
+        raise HTTPException(404, "No running agent workers found")
+    for rank in ranks:
+        await subprocess_manager.kill_agent(run_name, rank)
+    return {"halfbaked_ranks": ranks}
 
 
 @router.post("/{run_name}/clear")

@@ -60,7 +60,15 @@ async function loadRunData(runName) {
 
   connectWS(runName);
 
-  Tree.init(runName, records, (uid, agentRank) => { BottomPanels.selectState(uid, agentRank); });
+  Tree.init(runName, records,
+    (uid, agentRank) => { BottomPanels.selectState(uid, agentRank); },
+    null,
+    (rank) => {
+      const btn = document.getElementById('kill-agent-btn');
+      btn.style.display = rank !== null ? '' : 'none';
+    },
+    (agentRank, state) => { BottomPanels.selectLiveAgent(agentRank, state); },
+  );
   BottomPanels.init(runName, records);
   await OperatorPanel.load(runName);
 
@@ -116,12 +124,15 @@ function handleWsEvent(runName, msg) {
 
     case 'step_started':
       setTreeStatus('Running', true);
+      document.getElementById('halfbake-btn').style.display = '';
       OperatorPanel.onStepStarted(msg.operator_name);
       Tree.onStepStarted(msg.pre_agents || [], msg.step_num, msg.operator_name);
+      BottomPanels.onStepStarted(msg.pre_agents || []);
       break;
 
     case 'agent_started':
       Tree.onAgentStarted(msg.agent_rank);
+      BottomPanels.onAgentStarted(msg.agent_rank);
       break;
 
     case 'agent_status':
@@ -131,7 +142,7 @@ function handleWsEvent(runName, msg) {
 
     case 'agent_completed':
       Tree.onAgentCompleted(msg.agent_rank, msg.state || {});
-      BottomPanels.onAgentCompleted(msg.agent_rank, msg.state || {});
+      BottomPanels.onAgentCompleted(msg.agent_rank, msg.state || {});  // updates live counts + auto-renders if selected
       break;
 
     case 'agent_log':
@@ -140,10 +151,12 @@ function handleWsEvent(runName, msg) {
 
     case 'agent_failed':
       Tree.onAgentFailed(msg.agent_rank, msg.error || '');
+      BottomPanels.onAgentFailed(msg.agent_rank, msg.error || '');
       break;
 
     case 'step_completed':
       clearTreeStatus();
+      document.getElementById('halfbake-btn').style.display = 'none';
       OperatorPanel.onStepDone();
       Tree.onStepCompleted(msg.record);
       BottomPanels.onRecordAdded(msg.record);
@@ -151,6 +164,7 @@ function handleWsEvent(runName, msg) {
 
     case 'step_failed':
       clearTreeStatus();
+      document.getElementById('halfbake-btn').style.display = 'none';
       OperatorPanel.onStepDone();
       Tree.onStepFailed(msg.error || '');
       break;
@@ -187,6 +201,31 @@ document.getElementById('delete-states-btn').addEventListener('click', async () 
   await loadRunData(rn);
 });
 
+// ── Kill Agent button ─────────────────────────────────────────────────────────
+document.getElementById('kill-agent-btn').addEventListener('click', async () => {
+  const rank = Tree.getSelectedRunningRank();
+  if (rank === null) return;
+  const rn = App.activeRun;
+  if (!rn) return;
+  try {
+    await api('POST', `/api/runs/${rn}/kill_agent/${rank}`);
+    Tree.onAgentUserKilled(rank);
+  } catch (e) { alert(e.message); }
+});
+
+// ── Half-bake Step button ─────────────────────────────────────────────────────
+document.getElementById('halfbake-btn').addEventListener('click', async () => {
+  const rn = App.activeRun;
+  if (!rn) return;
+  if (!confirm('Kill all still-running agents and finish the step with only the completed ones?')) return;
+  try {
+    const res = await api('POST', `/api/runs/${rn}/halfbake`);
+    for (const rank of (res.halfbaked_ranks || [])) {
+      Tree.onAgentUserKilled(rank);
+    }
+  } catch (e) { alert(e.message); }
+});
+
 // ── Menu ──────────────────────────────────────────────────────────────────────
 const menuBtn = document.getElementById('menu-btn');
 const menuDropdown = document.getElementById('menu-dropdown');
@@ -212,6 +251,25 @@ document.getElementById('dlg-create-run-ok').addEventListener('click', async () 
     App.runs = (await api('GET', '/api/runs')).runs;
     renderTabs();
     await switchRun(name);
+  } catch (e) { alert(e.message); }
+});
+
+// Copy run
+document.getElementById('menu-copy').addEventListener('click', () => {
+  if (!App.activeRun) return;
+  menuDropdown.classList.remove('open');
+  document.getElementById('dlg-copy-run-name').value = App.activeRun + '_copy';
+  document.getElementById('dlg-copy-run').showModal();
+});
+document.getElementById('dlg-copy-run-ok').addEventListener('click', async () => {
+  const newName = document.getElementById('dlg-copy-run-name').value.trim();
+  if (!newName) return;
+  try {
+    await api('POST', `/api/runs/${App.activeRun}/copy`, { new_name: newName });
+    document.getElementById('dlg-copy-run').close();
+    App.runs = (await api('GET', '/api/runs')).runs;
+    renderTabs();
+    await switchRun(newName);
   } catch (e) { alert(e.message); }
 });
 

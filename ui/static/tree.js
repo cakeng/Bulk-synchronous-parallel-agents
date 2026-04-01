@@ -20,7 +20,12 @@ const Tree = (() => {
   let _queue = [];          // queued operator names (not yet started)
   let _selectedUid = null;
   let _selectedAgent = null;
+  let _selectedRunningRank = null;  // agent_rank of selected in-progress node
+  let _selectedDoneRank    = null;  // agent_rank of selected completed-but-in-progress node
+  let _runningKilledRanks = new Set();  // ranks killed by user during current step
   let _onSelect = null;
+  let _onRunningSelect = null;
+  let _onDoneAgentSelect = null;
   let _onDeleteStep = null;
 
   // ── Zoom / pan state ──────────────────────────────────────────────────────
@@ -32,10 +37,31 @@ const Tree = (() => {
   let _interactionReady = false;
 
   // ── Build rows from records ───────────────────────────────────────────────
+
+  // Assign _renderRank only to killed agents, placing them to the right of all
+  // live agents.  Live agents are NOT moved — they keep their agent_rank column
+  // so edges between rows stay straight.
+  // isKilledFn defaults to checking agent_killed; pass a custom predicate for
+  // the in-progress row where user_killed status also counts.
+  // Mutates the (already-copied) array.
+  function _assignRenderRanks(agents, isKilledFn) {
+    const dead = isKilledFn || (a => !!a.agent_killed);
+    const maxLiveRank = agents
+      .filter(a => !dead(a))
+      .reduce((m, a) => Math.max(m, a.agent_rank), -1);
+    agents
+      .filter(a => dead(a))
+      .sort((a, b) => a.agent_rank - b.agent_rank)
+      .forEach((a, i) => { a._renderRank = maxLiveRank + 1 + i; });
+  }
+
   function buildRows() {
     const rows = [];
     for (const rec of _records) {
-      rows.push({ uid: rec.uid, opName: rec.operator_name, opType: rec.operator_type || 'base', agents: rec.post_agents, stepNum: rec.step_num });
+      // Copy agents so we can attach _renderRank without mutating shared state
+      const agents = rec.post_agents.map(a => ({ ...a }));
+      _assignRenderRanks(agents);
+      rows.push({ uid: rec.uid, opName: rec.operator_name, opType: rec.operator_type || 'base', agents, stepNum: rec.step_num });
     }
     if (_pendingAgents.size > 0 || Object.keys(_failedAgents).length > 0 || _pendingOpName !== null) {
       const prevAgents = rows.length > 0 ? rows[rows.length - 1].agents : [];
@@ -50,10 +76,17 @@ const Tree = (() => {
         return [...seen].sort((a, b) => a - b).map(rank => ({ agent_rank: rank }));
       })();
       const inProgAgents = effectiveAgents.map(a => {
+        // Agents already killed in a prior step: preserve their flag, skip other status logic
+        if (a.agent_killed) return { ...a };
+        if (_runningKilledRanks.has(a.agent_rank))
+          return { ...a, _status: 'user_killed' };
         if (_failedAgents[a.agent_rank] !== undefined)
           return { ...a, _status: 'failed', _error: _failedAgents[a.agent_rank] };
         return { ...a, _status: _inProgress[a.agent_rank] ? 'done' : 'running' };
       });
+      // Pack live agents and push all killed agents (agent_killed or user_killed)
+      // to the right in contiguous columns.
+      _assignRenderRanks(inProgAgents, a => a.agent_killed || a._status === 'user_killed');
       rows.push({
         uid: null, opName: _pendingOpName || (_stepFailed ? '…failed…' : '…running…'),
         opType: '', agents: inProgAgents,
@@ -65,6 +98,7 @@ const Tree = (() => {
     if (_queue.length > 0) {
       const lastAgents = rows.length > 0 ? rows[rows.length - 1].agents : [];
       const queuedAgents = lastAgents.map(a => ({ ...a, _status: 'queued' }));
+      _assignRenderRanks(queuedAgents);
       for (const opName of _queue) {
         rows.push({ uid: null, opName, opType: '', agents: queuedAgents, queued: true, stepNum: null });
       }
@@ -88,45 +122,95 @@ const Tree = (() => {
   }
 
   function makeNode(svg, rowIdx, agent, uid, inProgress) {
-    const x  = nodeX(agent.agent_rank);
+    const visRank = agent._renderRank ?? agent.agent_rank;
+    const x  = nodeX(visRank);
     const y  = nodeY(rowIdx);
-    const cx = nodeCx(agent.agent_rank);
+    const cx = nodeCx(visRank);
     const cy = nodeCy(rowIdx);
 
+    const isUserKilled = agent.agent_killed || agent._status === 'user_killed';
+
     const g = svgEl('g', { class: 'tree-node', 'data-uid': uid || '', 'data-rank': agent.agent_rank, cursor: 'pointer' }, svg);
-    if (agent._status === 'failed') g.classList.add('agent-failed');
+    if (isUserKilled) g.classList.add('user-killed');
+    else if (agent._status === 'failed') g.classList.add('agent-failed');
     else if (agent._status === 'running') g.classList.add('running-pending');
     else if (agent._status === 'queued') g.classList.add('queued');
     else if (inProgress && agent._status === 'done') g.classList.add('running');
 
     if (uid === _selectedUid && agent.agent_rank === _selectedAgent) g.classList.add('selected');
     if (uid === _selectedUid && _selectedAgent === null) g.classList.add('selected');
+    if (inProgress && agent._status === 'running' && agent.agent_rank === _selectedRunningRank) g.classList.add('selected-running');
+    if (inProgress && agent._status === 'done'    && agent.agent_rank === _selectedDoneRank)    g.classList.add('selected-done');
 
     const status = (agent._status === 'running' || agent._status === 'done')
       ? (_agentStatus[agent.agent_rank] || null) : null;
 
     svgEl('rect', { x, y, width: NODE_W, height: NODE_H, rx: 4 }, g);
 
-    const nameY = status ? y + 11 : y + NODE_H / 2 - 6;
-    svgEl('text', { x: cx, y: nameY, 'text-anchor': 'middle', 'font-size': 12, fill: '#9cdcfe' }, g)
+    const nameY = (status || isUserKilled) ? y + 11 : y + NODE_H / 2 - 6;
+    svgEl('text', { x: cx, y: nameY, 'text-anchor': 'middle', 'font-size': 12, fill: isUserKilled ? '#c57a00' : '#9cdcfe' }, g)
       .textContent = `Agent ${agent.agent_rank}`;
 
     const uid8 = (agent.unique_id || '').slice(-8);
-    const uidY = status ? y + 23 : y + NODE_H / 2 + 9;
+    const uidY = (status || isUserKilled) ? y + 23 : y + NODE_H / 2 + 9;
     svgEl('text', { x: cx, y: uidY, 'text-anchor': 'middle', 'font-size': 10, fill: '#666' }, g)
       .textContent = uid8;
 
-    if (status) {
+    if (isUserKilled) {
+      svgEl('text', { x: cx, y: y + 36, 'text-anchor': 'middle', 'font-size': 9, fill: '#c57a00' }, g)
+        .textContent = '✕ killed';
+    } else if (status) {
       const maxLen = 17;
       const label  = status.length > maxLen ? status.slice(0, maxLen - 1) + '…' : status;
       svgEl('text', { x: cx, y: y + 36, 'text-anchor': 'middle', 'font-size': 9, fill: '#6a9f6a' }, g)
         .textContent = label;
     }
 
-    // Single-click: select completed agents; no-op for in-progress/failed/queued
+    // Prevent mousedown from bubbling to the container's drag handler so
+    // clicks on nodes don't accidentally start a pan.
+    if (agent._status !== 'queued') {
+      g.addEventListener('mousedown', e => e.stopPropagation());
+    }
+    if (inProgress && (agent._status === 'done' || isUserKilled)) {
+      g.style.cursor = 'pointer';
+    }
+
+    // Single-click: select completed agents; select running agents for kill;
+    // open log for killed agents (to inspect what ran before death)
     g.addEventListener('click', e => {
       if (e.detail > 1) return;  // ignore clicks that are part of a dblclick
-      if (inProgress || agent._status === 'failed' || agent._status === 'queued') return;
+      if (agent._status === 'queued') return;
+
+      // User-killed agents in the in-progress row: open their output log
+      if (agent._status === 'user_killed') {
+        _openLogDialog(agent.agent_rank);
+        return;
+      }
+
+      // Permanently-killed agents in a completed record row: select to view state
+      if (agent.agent_killed && !inProgress) {
+        _selectedUid = uid;
+        _selectedAgent = agent.agent_rank;
+        render();
+        if (_onSelect) _onSelect(uid, agent.agent_rank);
+        return;
+      }
+      if (inProgress && agent._status === 'running') {
+        // Toggle selection of running agent
+        _selectedRunningRank = _selectedRunningRank === agent.agent_rank ? null : agent.agent_rank;
+        render();
+        if (typeof _onRunningSelect === 'function') _onRunningSelect(_selectedRunningRank);
+        return;
+      }
+      if (inProgress && agent._status === 'done') {
+        _selectedDoneRank = _selectedDoneRank === agent.agent_rank ? null : agent.agent_rank;
+        render();
+        if (typeof _onDoneAgentSelect === 'function') {
+          _onDoneAgentSelect(_selectedDoneRank, _selectedDoneRank !== null ? (_inProgress[agent.agent_rank] || null) : null);
+        }
+        return;
+      }
+      if (inProgress || agent._status === 'failed') return;
       _selectedUid = uid;
       _selectedAgent = agent.agent_rank;
       render();
@@ -309,7 +393,7 @@ const Tree = (() => {
     if (rows.length === 0) { _updateMinimap(); return; }
 
     const maxRank = rows.reduce((m, row) =>
-      Math.max(m, ...row.agents.map(a => a.agent_rank), 0), 0);
+      Math.max(m, ...row.agents.map(a => a._renderRank ?? a.agent_rank), 0), 0);
 
     const W = PAD_LEFT + (maxRank + 1) * COL_W + 20;
     const H = PAD_TOP + rows.length * STEP_H + 20;
@@ -393,9 +477,12 @@ const Tree = (() => {
     }
 
     // Pre-compute posMap (needed before edges are drawn)
+    // Key by visRank (not agent_rank) so killed agents and the live agent that
+    // inherited their rank after KillOperator reindex get distinct map entries.
     rows.forEach((row, ri) => {
       row.agents.forEach(agent => {
-        posMap[ri][agent.agent_rank] = { cx: nodeCx(agent.agent_rank), cy: nodeCy(ri) };
+        const visRank = agent._renderRank ?? agent.agent_rank;
+        posMap[ri][visRank] = { cx: nodeCx(visRank), cy: nodeCy(ri) };
       });
     });
 
@@ -408,8 +495,9 @@ const Tree = (() => {
       // Queued rows: draw grey dashed same-rank continuation edges only
       if (nextRow.queued) {
         nextRow.agents.forEach(nextAgent => {
-          const to   = posMap[ri + 1][nextAgent.agent_rank];
-          const from = posMap[ri][nextAgent.agent_rank];
+          const vr   = nextAgent._renderRank ?? nextAgent.agent_rank;
+          const to   = posMap[ri + 1][vr];
+          const from = posMap[ri][vr];
           if (!from || !to) return;
           svgEl('line', {
             x1: from.cx, y1: from.cy + NODE_H / 2,
@@ -435,7 +523,28 @@ const Tree = (() => {
       };
 
       nextRow.agents.forEach(nextAgent => {
-        const to = posMap[ri + 1][nextAgent.agent_rank];
+        // Killed agents: draw an orange dashed edge from the source position to
+        // the killed-zone position (replaces the dead-end X).
+        if (nextAgent._status === 'user_killed' || nextAgent.agent_killed) {
+          let src = curRow.agents.find(a => a.unique_id === nextAgent.unique_id && nextAgent.unique_id);
+          if (!src) src = curRow.agents.find(a => a.agent_rank === nextAgent.agent_rank);
+          if (src) {
+            consumedCurRanks.add(src.agent_rank);
+            const from = posMap[ri][src._renderRank ?? src.agent_rank];
+            const to   = posMap[ri + 1][nextAgent._renderRank ?? nextAgent.agent_rank];
+            if (from && to) {
+              svgEl('line', {
+                x1: from.cx, y1: from.cy + NODE_H / 2,
+                x2: to.cx,   y2: to.cy   - NODE_H / 2,
+                stroke: '#c57a00', 'stroke-width': 1.5,
+                'stroke-dasharray': '4,3', fill: 'none',
+              }, svg);
+            }
+          }
+          return;
+        }
+
+        const to = posMap[ri + 1][nextAgent._renderRank ?? nextAgent.agent_rank];
         if (!to) return;
 
         if (isForkStep && nextAgent.parent_id) {
@@ -443,13 +552,14 @@ const Tree = (() => {
           const src = curRow.agents.find(a => a.unique_id === nextAgent.parent_id);
           if (!src) return;
           consumedCurRanks.add(src.agent_rank);
-          const from = posMap[ri][src.agent_rank];
+          const from = posMap[ri][src._renderRank ?? src.agent_rank];
           if (from) drawEdge(from, to, 'fork');
 
         } else if (isShuffleStep && nextAgent.shuffle_sources) {
           // Shuffle: draw one orange edge from each source rank to this agent
           for (const srcRank of nextAgent.shuffle_sources) {
-            const from = posMap[ri][srcRank];
+            const srcAgent = curRow.agents.find(a => a.agent_rank === srcRank);
+            const from = posMap[ri][srcAgent ? (srcAgent._renderRank ?? srcAgent.agent_rank) : srcRank];
             if (!from) continue;
             consumedCurRanks.add(srcRank);
             drawEdge(from, to, 'shuffle');
@@ -463,7 +573,7 @@ const Tree = (() => {
           if (!src) src = curRow.agents.find(a => a.agent_rank === nextAgent.agent_rank);
           if (!src) return;
           consumedCurRanks.add(src.agent_rank);
-          const from = posMap[ri][src.agent_rank];
+          const from = posMap[ri][src._renderRank ?? src.agent_rank];
           if (from) drawEdge(from, to, opType);
         }
       });
@@ -477,9 +587,11 @@ const Tree = (() => {
       }
 
       // Dead-end (killed) agents: in curRow but not consumed by nextRow
+      // (user-killed agents are carried forward into every row, so never draw X for them)
       curRow.agents.forEach(curAgent => {
         if (consumedCurRanks.has(curAgent.agent_rank)) return;
-        const from = posMap[ri][curAgent.agent_rank];
+        if (curAgent.agent_killed) return;
+        const from = posMap[ri][curAgent._renderRank ?? curAgent.agent_rank];
         if (!from) return;
         const x  = from.cx;
         const y1 = from.cy + NODE_H / 2;
@@ -515,7 +627,7 @@ const Tree = (() => {
 
   // ── Public API ────────────────────────────────────────────────────────────
   return {
-    init(runName, records, onSelect, onDeleteStep) {
+    init(runName, records, onSelect, onDeleteStep, onRunningSelect, onDoneAgentSelect) {
       _runName      = runName;
       _records      = [...records];  // own copy — don't share with BottomPanels
       _inProgress     = {};
@@ -529,9 +641,14 @@ const Tree = (() => {
       _stepFailed     = false;
       _queue          = [];
       _selectedUid    = null;
-      _selectedAgent = null;
-      _onSelect     = onSelect;
-      _onDeleteStep = onDeleteStep;
+      _selectedAgent  = null;
+      _selectedRunningRank = null;
+      _selectedDoneRank    = null;
+      _runningKilledRanks  = new Set();
+      _onSelect           = onSelect;
+      _onRunningSelect    = onRunningSelect    || null;
+      _onDoneAgentSelect  = onDoneAgentSelect  || null;
+      _onDeleteStep       = onDeleteStep;
       _scale = 1; _panX = 16; _panY = 16;
       _setupInteraction();
       render();
@@ -544,11 +661,13 @@ const Tree = (() => {
       // Do NOT reset _queue here — queue_updated fires before step_started and
       // already holds the correct remaining queue (running op already removed).
       // Clearing here would erase the still-queued operators from the tree.
-      _pendingAgents  = new Set(preAgents.map(a => a.agent_rank));
-      _inProgress     = {};
-      _failedAgents   = {};
-      _agentStatus    = {};
-      _agentLogs      = {};
+      _pendingAgents      = new Set(preAgents.filter(a => !a.agent_killed).map(a => a.agent_rank));
+      _inProgress         = {};
+      _failedAgents       = {};
+      _agentStatus        = {};
+      _agentLogs          = {};
+      _runningKilledRanks = new Set();
+      _selectedDoneRank   = null;
       _pendingStepNum = stepNum || null;
       _pendingOpName  = opName  || null;
       render();
@@ -607,13 +726,17 @@ const Tree = (() => {
 
     onStepCompleted(record) {
       if (!_records.some(r => r.uid === record.uid)) _records.push(record);
-      _inProgress     = {};
-      _pendingAgents  = new Set();
-      _failedAgents   = {};
-      _agentStatus    = {};
-      _stepFailed     = false;
-      _pendingStepNum = null;
-      _pendingOpName  = null;
+      _inProgress         = {};
+      _pendingAgents      = new Set();
+      _failedAgents       = {};
+      _agentStatus        = {};
+      _stepFailed         = false;
+      _pendingStepNum     = null;
+      _pendingOpName      = null;
+      _selectedRunningRank = null;
+      _selectedDoneRank    = null;
+      _runningKilledRanks  = new Set();
+      if (_onRunningSelect) _onRunningSelect(null);
       render(true);  // auto-pan to bottom
     },
 
@@ -650,10 +773,14 @@ const Tree = (() => {
           }
         }
       }
-      _stepFailed    = true;
-      _inProgress    = {};
-      _pendingAgents = new Set();
-      _agentStatus   = {};
+      _stepFailed         = true;
+      _inProgress         = {};
+      _pendingAgents      = new Set();
+      _agentStatus        = {};
+      _selectedRunningRank = null;
+      _selectedDoneRank    = null;
+      _runningKilledRanks  = new Set();
+      if (_onRunningSelect) _onRunningSelect(null);
       render();
     },
 
@@ -663,5 +790,15 @@ const Tree = (() => {
     },
 
     getSelectedUid() { return _selectedUid; },
+    getSelectedRunningRank() { return _selectedRunningRank; },
+
+    onAgentUserKilled(rank) {
+      _runningKilledRanks.add(rank);
+      if (_selectedRunningRank === rank) {
+        _selectedRunningRank = null;
+        if (_onRunningSelect) _onRunningSelect(null);
+      }
+      render();
+    },
   };
 })();

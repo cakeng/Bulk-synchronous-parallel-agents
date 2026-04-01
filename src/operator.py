@@ -1,5 +1,52 @@
+import shutil
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Any, List, Tuple
+
+
+def clear_history(agent_state: dict) -> None:
+    """Clear the agent's accumulated chat history.
+
+    Resets ``agent_config["context"]`` to an empty list so the next
+    ``run_agent`` call starts with a clean conversation.
+
+    Example::
+
+        from src.operator import Operator, clear_history
+
+        class ResetStep(Operator):
+            async def run(self, _local, _global):
+                clear_history(_local)
+    """
+    agent_state["agent_config"]["context"] = []
+
+
+def copy_to_workspace(src: str | Path, agent_state: dict, dest: str | None = None) -> Path:
+    """Copy a file into the agent's workspace directory.
+
+    Args:
+        src:         Path to the source file (absolute or relative to the project root).
+        agent_state: The ``_local`` dict from the operator's ``run`` method.
+        dest:        Destination filename inside the workspace.
+                     Defaults to the source file's basename.
+
+    Returns:
+        The Path of the copied file inside the workspace.
+
+    Example::
+
+        from src.operator import Operator, copy_to_workspace
+
+        class LoadDoc(Operator):
+            async def run(self, _local, _global):
+                copy_to_workspace("runs/my_run/doc.md", _local)
+    """
+    ws = Path(agent_state["workspace_dir"])
+    src = Path(src)
+    dst = ws / (dest if dest else src.name)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
+    return dst
 
 
 class Operator(ABC):

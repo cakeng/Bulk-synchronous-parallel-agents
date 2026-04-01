@@ -14,11 +14,16 @@ class AgentState(dict):
     """
 
     def clear_history(self) -> None:
-        """Clear the chat context and call log, keeping all other agent variables."""
+        """Clear the chat context and call log, keeping all other agent variables.
+
+        Also clears ``claude_session_id`` so that run_agent_claude starts a
+        fresh Claude Code session rather than resuming the old one.
+        """
         cfg = self.get("agent_config")
         if cfg is not None:
             cfg["context"] = []
             cfg["call_log"] = []
+        self.pop("claude_session_id", None)
 
 
 def compute_unique_id(state: dict) -> str:

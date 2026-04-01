@@ -2,10 +2,12 @@
 
 Usage:
     cd /data/js_park/bsa
-    python ui/server.py        # or: python -m ui.server
+    python -m ui.server                # default port 18001
+    python -m ui.server --port 18002   # custom port
 """
 from __future__ import annotations
 
+import argparse
 import subprocess
 import sys
 from pathlib import Path
@@ -14,7 +16,7 @@ from pathlib import Path
 if __name__ == "__main__" and __package__ is None:
     root = Path(__file__).resolve().parent.parent
     result = subprocess.run(
-        [sys.executable, "-m", "ui.server"],
+        [sys.executable, "-m", "ui.server"] + sys.argv[1:],
         cwd=str(root),
     )
     sys.exit(result.returncode)
@@ -45,4 +47,8 @@ async def startup() -> None:
 
 
 if __name__ == "__main__":
-    uvicorn.run("ui.server:app", host="127.0.0.1", port=18001, reload=True)
+    parser = argparse.ArgumentParser(description="BSA UI Server")
+    parser.add_argument("--port", type=int, default=18001, help="Port to listen on (default: 18001)")
+    parser.add_argument("--host", default="127.0.0.1", help="Host to bind to (default: 127.0.0.1)")
+    args = parser.parse_args()
+    uvicorn.run("ui.server:app", host=args.host, port=args.port, reload=False)

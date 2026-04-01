@@ -63,6 +63,27 @@ async def remove_from_queue(run_name: str, operator_name: str) -> bool:
     return False
 
 
+async def kill_agent(run_name: str, agent_rank: int) -> bool:
+    """Kill the worker subprocess for a specific agent. Returns True if a PID was found."""
+    run = state_manager.get_run(run_name)
+    pid = run.agent_pids.get(agent_rank)
+    if not pid:
+        return False
+    try:
+        parent = psutil.Process(pid)
+        for child in parent.children(recursive=True):
+            try:
+                child.kill()
+            except psutil.NoSuchProcess:
+                pass
+        parent.kill()
+    except psutil.NoSuchProcess:
+        pass
+    run.agent_pids.pop(agent_rank, None)
+    run.killed_ranks.add(agent_rank)
+    return True
+
+
 async def kill_current(run_name: str) -> None:
     """Kill the running subprocess (and all its children) for a run."""
     run = state_manager.get_run(run_name)
@@ -144,6 +165,8 @@ async def _run_one(run_name: str, operator_name: str, kill_failed: bool = False)
     run.running_operator = operator_name
     run.step_log = []    # clear previous step log
     run.agent_logs = {}  # clear previous agent logs
+    run.agent_pids = {}  # clear previous agent PIDs
+    run.killed_ranks = set()  # clear killed ranks for this step
 
     op_path = RUNS_DIR / run_name / "operators" / operator_name
     operator_code = op_path.read_text() if op_path.exists() else ""
@@ -181,6 +204,7 @@ async def _run_one(run_name: str, operator_name: str, kill_failed: bool = False)
         run.running_pid = proc.pid
 
         post_agents: list[dict] = []
+        engine_killed_agents: list[dict] = []
         engine_globals: dict = {}
         proc_stderr_lines: list[str] = []
 
@@ -247,10 +271,16 @@ async def _run_one(run_name: str, operator_name: str, kill_failed: bool = False)
                         event["run"] = run_name
                         if event.get("type") == "post_processing_done":
                             post_agents = event.pop("agents", [])
+                            engine_killed_agents = event.pop("killed_agents", [])
                             engine_globals = event.pop("globals", {})
                         # Store agent_log and agent_status lines server-side for replay
                         evt_type = event.get("type")
                         rank = event.get("agent_rank")
+                        if rank is not None and evt_type == "worker_pid":
+                            run.agent_pids[rank] = event.get("pid")
+                            continue  # internal event — don't broadcast
+                        if rank is not None and evt_type == "agent_completed":
+                            run.agent_pids.pop(rank, None)
                         if rank is not None:
                             if evt_type == "agent_log":
                                 stream = event.get("stream", "stdout")
@@ -324,6 +354,55 @@ async def _run_one(run_name: str, operator_name: str, kill_failed: bool = False)
         run.running_operator = None
 
         if proc.returncode == 0 and post_agents:
+            # If any agents were killed by the user this step, move them from
+            # active to the killed list in engine_state.pt (so next step skips them).
+            if run.killed_ranks:
+                state_file = RUNS_DIR / run_name / "engine_state.pt"
+                if state_file.exists():
+                    try:
+                        import torch as _torch
+                        data = _torch.load(state_file, weights_only=False)
+                        newly_killed, still_active = [], []
+                        for a in data.get("agents", []):
+                            if a.get("agent_rank") in run.killed_ranks:
+                                a["agent_killed"] = True
+                                newly_killed.append(a)
+                            else:
+                                still_active.append(a)
+                        data["agents"] = still_active
+                        data["killed_agents"] = data.get("killed_agents", []) + newly_killed
+                        _torch.save(data, state_file)
+                    except Exception as _patch_err:
+                        print(f"[subprocess_manager] Failed to patch engine_state.pt: {_patch_err}", file=sys.stderr)
+
+            # Identify newly-killed agents using pre-step state (by rank → uid),
+            # so we are immune to any reindexing the engine did after removing the
+            # killed subprocess.  Build the correct killed-agent dicts from
+            # pre_agents, then strip any stale entries from post_agents.
+            if run.killed_ranks:
+                pre_by_rank = {a.get("agent_rank"): a for a in pre_agents}
+                killed_uids: set = set()
+                newly_killed_entries: list = []
+                for rank in run.killed_ranks:
+                    orig = pre_by_rank.get(rank)
+                    if orig:
+                        ka = dict(orig)
+                        ka["agent_killed"] = True
+                        newly_killed_entries.append(ka)
+                        uid = orig.get("unique_id")
+                        if uid:
+                            killed_uids.add(uid)
+                # Remove killed agents from post_agents.  If we have uids (the
+                # normal case), match by uid — safe even after reindexing.
+                # Otherwise fall back to rank, which may be wrong but is all we have.
+                if killed_uids:
+                    post_agents = [a for a in post_agents if a.get("unique_id") not in killed_uids]
+                else:
+                    post_agents = [a for a in post_agents if a.get("agent_rank") not in run.killed_ranks]
+                post_agents.extend(newly_killed_entries)
+
+            post_agents.sort(key=lambda a: (1 if a.get("agent_killed") else 0, a.get("agent_rank", 0)))
+
             record = state_manager.add_engine_state_record(
                 run_name=run_name,
                 step_num=step_num,

@@ -303,7 +303,7 @@ const OperatorPanel = (() => {
   }
 
   // ── Toolbar actions ───────────────────────────────────────────────────────
-  async function createOp(name, opType) {
+  async function createOp(name, opType, insertIdx) {
     const res = await fetch(`/api/runs/${_runName}/operators`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -311,9 +311,19 @@ const OperatorPanel = (() => {
     });
     if (!res.ok) { alert((await res.json()).detail); return; }
     const op = await res.json();  // {name, body}
-    _operators.push(op);
+    if (insertIdx !== undefined && insertIdx >= 0 && insertIdx < _operators.length) {
+      _operators.splice(insertIdx, 0, op);
+      await fetch(`/api/runs/${_runName}/operators/reorder`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ names: _operators.map(o => o.name) }),
+      });
+    } else {
+      _operators.push(op);
+    }
     render();
-    container().lastChild?.scrollIntoView({ behavior: 'smooth' });
+    const newCell = container()?.querySelector(`[data-name="${op.name}"]`);
+    newCell?.scrollIntoView({ behavior: 'smooth' });
   }
 
   function copySelected() {
@@ -401,8 +411,12 @@ const OperatorPanel = (() => {
     onStepStarted,
     onStepDone,
     relayout,
-    getSelected: () => [..._selectedNames],
-    getNames:    () => _operators.map(o => o.name),
+    getSelected:      () => [..._selectedNames],
+    getNames:         () => _operators.map(o => o.name),
+    getSelectedIndex: () => {
+      const name = [..._selectedNames][0];
+      return name ? _operators.findIndex(o => o.name === name) : -1;
+    },
   };
 })();
 
@@ -421,7 +435,8 @@ _newOpDropdown.querySelectorAll('.dropdown-item').forEach(item => {
     _newOpDropdown.classList.remove('open');
     const opType = item.dataset.opType;
     const name   = _autoName(opType);
-    OperatorPanel.createOp(name, opType);
+    const selIdx = OperatorPanel.getSelectedIndex();
+    OperatorPanel.createOp(name, opType, selIdx >= 0 ? selIdx + 1 : undefined);
   });
 });
 
