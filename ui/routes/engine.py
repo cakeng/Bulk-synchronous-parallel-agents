@@ -16,7 +16,10 @@ def _run_or_404(run_name: str):
 
 @router.get("")
 async def list_engine_states(run_name: str) -> dict:
-    run = _run_or_404(run_name)
+    _run_or_404(run_name)
+    # Always reload engine states from disk so the UI stays in sync with the filesystem.
+    state_manager.reload_engine_states(run_name)
+    run = state_manager.get_run(run_name)
     return {
         "engine_states": [state_manager.record_to_summary(r)
                           for r in run.engine_state_list]

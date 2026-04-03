@@ -139,6 +139,20 @@ async def _emit_queue(run_name: str) -> None:
     })
 
 
+async def _clear_queue(run_name: str) -> None:
+    """Drain the asyncio queue and clear the visible queue list for a run."""
+    run = state_manager.get_run(run_name)
+    run.queue.clear()
+    q = _item_queues.get(run_name)
+    if q:
+        while not q.empty():
+            try:
+                q.get_nowait()
+            except Exception:
+                break
+    await _emit_queue(run_name)
+
+
 async def _broadcast_and_log(run_name: str, event: dict) -> None:
     """Broadcast an event and, if it's a step-lifecycle event, buffer it for reconnect."""
     if event.get("type") in _LOG_TYPES:
@@ -460,6 +474,7 @@ async def _run_one(run_name: str, operator_name: str, kill_failed: bool = False)
             elim_msg = "All agents were eliminated — kill_failed removed every agent that failed this step."
             if proc_stderr_lines:
                 elim_msg = "\n".join(proc_stderr_lines).strip() + "\n\n" + elim_msg
+            await _clear_queue(run_name)
             await _broadcast_and_log(run_name, {
                 "type": "step_failed",
                 "run": run_name,
@@ -478,6 +493,7 @@ async def _run_one(run_name: str, operator_name: str, kill_failed: bool = False)
                     buf.extend(f"[stderr] {l}" for l in proc_stderr_lines)
             error_text = "\n".join(proc_stderr_lines).strip() if proc_stderr_lines \
                 else f"Process exited with code {proc.returncode}"
+            await _clear_queue(run_name)
             await _broadcast_and_log(run_name, {
                 "type": "step_failed",
                 "run": run_name,
@@ -488,6 +504,7 @@ async def _run_one(run_name: str, operator_name: str, kill_failed: bool = False)
     except Exception as exc:
         run.running_pid = None
         run.running_operator = None
+        await _clear_queue(run_name)
         await _broadcast_and_log(run_name, {
             "type": "step_failed",
             "run": run_name,

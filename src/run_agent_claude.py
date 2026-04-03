@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -74,12 +75,18 @@ async def run_agent_claude(
     from src import ipc  # imported here to stay subprocess-friendly
 
     agent_config  = agent_state.get("agent_config", {})
-    workspace_dir = agent_state.get("workspace_dir", ".")
+    workspace_dir = agent_state.get("workspace_dir") or None
+    if not workspace_dir or not os.path.isdir(workspace_dir):
+        raise RuntimeError(
+            f"Agent has no valid workspace_dir (got {workspace_dir!r}). "
+            "Ensure the engine initialises workspaces before running operators."
+        )
     session_id    = agent_state.get("claude_session_id")
 
-    # Claude Code manages its own context; the vLLM-style context list is not
-    # used and would show stale/wrong content in the chat panel — clear it.
-    agent_config["context"] = []
+    # Preserve existing context across operator calls so the chat panel shows
+    # the full conversation history.  New messages are appended below.
+    if "context" not in agent_config:
+        agent_config["context"] = []
     # Model: claude_model overrides the shared model key so the two harnesses
     # can coexist in the same run with different model selections.
     model       = agent_config.get("claude_model") or agent_config.get("model", "claude-opus-4-6")
@@ -207,7 +214,6 @@ async def _invoke_claude(
     ``messages`` is a reconstructed OpenAI-format conversation list suitable for
     storing in ``agent_config["context"]`` for the chat panel.
     """
-    import os
     cmd = [
         "claude", "-p", prompt,
         "--output-format", "stream-json",
@@ -240,6 +246,11 @@ async def _invoke_claude(
         env["ANTHROPIC_DEFAULT_OPUS_MODEL"]   = model
         env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = model
         env["ANTHROPIC_DEFAULT_HAIKU_MODEL"]  = model
+    env["API_TIMEOUT_MS"]                        = "6000000"
+    env["BASH_DEFAULT_TIMEOUT_MS"]               = "1800000"
+    env["BASH_MAX_TIMEOUT_MS"]                   = "7200000"
+    env["DISABLE_TELEMETRY"]                     = "1"
+    env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
 
     ipc.emit({"type": "agent_status", "status": "Waiting for Claude Code"})
     ipc.emit({"type": "agent_log", "stream": "stdout",

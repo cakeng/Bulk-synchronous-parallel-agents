@@ -79,6 +79,13 @@ class Engine:
             self.agents.append(agent)
         self.killed_agents = killed_states
         self.globals = globals_ or {"step": 0, "agent_size": len(self.agents)}
+
+        # Ensure every agent has a workspace.  This handles agents loaded from
+        # snapshots that were saved before workspace support, or where workspace_dir
+        # was lost (e.g. None in saved state).
+        for agent in self.agents:
+            if not agent.get("workspace_dir"):
+                self._setup_agent_workspace(agent)
         if self.killed_agents:
             log.print_engine(
                 f"[Engine] Loaded {len(self.agents)} active agent(s) + "
@@ -521,6 +528,24 @@ class Engine:
                 ["git", "init"],
                 cwd=ws, capture_output=True, check=False,
             )
+            # Block all outbound git pushes with a pre-push hook.
+            hooks_dir = ws / ".git" / "hooks"
+            hooks_dir.mkdir(exist_ok=True)
+            pre_push = hooks_dir / "pre-push"
+            pre_push.write_text("#!/bin/sh\necho 'git push is disabled in agent workspaces.' >&2\nexit 1\n")
+            pre_push.chmod(0o755)
+
+        # Write workspace instructions for the agent.
+        claude_md = ws / "CLAUDE.md"
+        claude_md.write_text(
+            "# Workspace Instructions\n\n"
+            "- Only read and write files within this workspace directory.\n"
+            "- Do NOT push to any remote git repository.\n"
+            "- Do NOT use absolute paths outside this directory.\n"
+            "- Do NOT run `step_engine.py` or create new BSA run directories under `runs/`.\n"
+            "- Do NOT `cd` out of this workspace directory.\n"
+        )
+
         agent["workspace_dir"] = str(ws)
         agent["agent_config"]["tools"] = _tools.build_tool_schemas()
 

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import re
+import shutil
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -12,6 +14,54 @@ import torch
 from src import op_codegen
 
 RUNS_DIR = Path("runs")
+CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
+
+
+def _workspace_to_project_slug(workspace_dir: str) -> str:
+    """Convert a workspace path to the Claude Code project directory slug.
+
+    Claude Code derives the project dir by replacing every non-alphanumeric
+    character in the absolute path with '-'.
+    e.g. /data/js_park/bsa/runs/moe_spec/workspaces/Gh7hczU=
+         → -data-js-park-bsa-runs-moe-spec-workspaces-Gh7hczU-
+    """
+    return re.sub(r'[^a-zA-Z0-9]', '-', workspace_dir)
+
+
+def _checkpoint_sessions(run_name: str, record_uid: str, full_agents: list[dict]) -> None:
+    """Snapshot each agent's Claude Code session JSONL next to the engine state."""
+    checkpoint_dir = RUNS_DIR / run_name / "engine_states" / "sessions" / record_uid
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    for agent in full_agents:
+        uid          = agent.get("unique_id")
+        workspace    = agent.get("workspace_dir")
+        session_id   = agent.get("claude_session_id")
+        if not (uid and workspace and session_id):
+            continue
+        slug = _workspace_to_project_slug(workspace)
+        src  = CLAUDE_PROJECTS_DIR / slug / f"{session_id}.jsonl"
+        if src.exists():
+            shutil.copy2(src, checkpoint_dir / f"{uid}.jsonl")
+
+
+def _restore_sessions(run_name: str, record_uid: str, full_agents: list[dict]) -> None:
+    """Restore each agent's Claude Code session JSONL from the checkpoint."""
+    checkpoint_dir = RUNS_DIR / run_name / "engine_states" / "sessions" / record_uid
+    if not checkpoint_dir.exists():
+        return
+    for agent in full_agents:
+        uid        = agent.get("unique_id")
+        workspace  = agent.get("workspace_dir")
+        session_id = agent.get("claude_session_id")
+        if not (uid and workspace and session_id):
+            continue
+        src = checkpoint_dir / f"{uid}.jsonl"
+        if not src.exists():
+            continue
+        slug     = _workspace_to_project_slug(workspace)
+        dest_dir = CLAUDE_PROJECTS_DIR / slug
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dest_dir / f"{session_id}.jsonl")
 
 
 @dataclass
@@ -91,6 +141,13 @@ def reload_run(run_name: str) -> None:
     if run:
         run.engine_state_list = _load_engine_states(run_name)
         run.operator_list = _load_operator_list(run_name)
+
+
+def reload_engine_states(run_name: str) -> None:
+    """Reload only engine states from disk (leaves operator list and live run state intact)."""
+    run = _runs.get(run_name)
+    if run:
+        run.engine_state_list = _load_engine_states(run_name)
 
 
 def clear_run(run_name: str) -> None:
@@ -232,6 +289,9 @@ def add_engine_state_record(
         "globals": engine_globals,
     }, file_path)
 
+    # Snapshot each agent's Claude Code session JSONL as a checkpoint.
+    _checkpoint_sessions(run_name, uid, post_agents)
+
     run.engine_state_list.append(record)
     return record
 
@@ -261,11 +321,44 @@ def remove_engine_states_from_index(run_name: str, from_index: int) -> list[str]
     run = _runs[run_name]
     removed = run.engine_state_list[from_index:]
     run.engine_state_list = run.engine_state_list[:from_index]
+
+    # Delete files for removed tracked records.
     for record in removed:
         try:
             Path(record.file_path).unlink(missing_ok=True)
         except Exception:
             pass
+
+    # Also delete any orphan .pt files (e.g. from CLI runs) that aren't referenced
+    # by the remaining tracked records, so step_engine.py doesn't load stale state.
+    kept_paths = {Path(r.file_path).resolve() for r in run.engine_state_list}
+    states_dir = RUNS_DIR / run_name / "engine_states"
+    if states_dir.exists():
+        for pt in states_dir.glob("*.pt"):
+            if pt.resolve() not in kept_paths:
+                try:
+                    pt.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+    # Delete session checkpoints for removed states.
+    for record in removed:
+        checkpoint_dir = RUNS_DIR / run_name / "engine_states" / "sessions" / record.uid
+        if checkpoint_dir.exists():
+            shutil.rmtree(checkpoint_dir, ignore_errors=True)
+
+    # Restore each agent's Claude Code session from the last kept checkpoint so
+    # the next run resumes from exactly the state after that step, without any
+    # memory of the deleted steps.
+    if run.engine_state_list:
+        last_record = run.engine_state_list[-1]
+        try:
+            data        = torch.load(last_record.file_path, weights_only=False)
+            full_agents = data.get("full_agents", [])
+            _restore_sessions(run_name, last_record.uid, full_agents)
+        except Exception:
+            pass
+
     return [r.uid for r in removed]
 
 

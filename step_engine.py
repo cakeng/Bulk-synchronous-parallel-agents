@@ -50,12 +50,25 @@ def resolve_run(run_name: str) -> Path:
 
 
 def latest_engine_state(run_dir: Path) -> Path | None:
-    """Return the most recent .pt snapshot from run_dir/engine_states/, or None."""
+    """Return the most recent .pt snapshot from run_dir/engine_states/, or None.
+
+    Sorts by the timestamp embedded at the end of the filename
+    (e.g. ``moe_spec_0004_engine_state_1775072587.pt`` → 1775072587) so that
+    files created later are always preferred, regardless of their step-number prefix.
+    """
+    import re
     states_dir = run_dir / "engine_states"
     if not states_dir.exists():
         return None
-    pts = sorted(states_dir.glob("*.pt"))
-    return pts[-1] if pts else None
+    pts = list(states_dir.glob("*.pt"))
+    if not pts:
+        return None
+
+    def _ts(p: Path) -> int:
+        m = re.search(r"_(\d+)\.pt$", p.name)
+        return int(m.group(1)) if m else 0
+
+    return max(pts, key=_ts)
 
 
 def resolve_operator(op_arg: str, run_dir: Path) -> Path:
@@ -117,6 +130,11 @@ async def main() -> None:
 
     run_dir   = resolve_run(args.run)
     op_path   = resolve_operator(args.operator, run_dir)
+
+    # Remove legacy root engine_state.pt if present (no longer used).
+    legacy = run_dir / "engine_state.pt"
+    if legacy.exists():
+        legacy.unlink()
 
     engine = Engine()
     engine.workspace_base = run_dir / "workspaces"
