@@ -23,6 +23,8 @@ const Tree = (() => {
   let _selectedRunningRank = null;  // agent_rank of selected in-progress node
   let _selectedDoneRank    = null;  // agent_rank of selected completed-but-in-progress node
   let _runningKilledRanks = new Set();  // ranks killed by user during current step
+  let _stepStartTime  = null;   // Date.now() when step started
+  let _completionTimes = [];    // timestamps (ms) when each agent completed
   let _onSelect = null;
   let _onRunningSelect = null;
   let _onDoneAgentSelect = null;
@@ -35,6 +37,18 @@ const Tree = (() => {
   let _dragging  = false;
   let _dragLast  = null;
   let _interactionReady = false;
+
+  // ── Progress stats for the running step ──────────────────────────────────
+  function _progressStats(totalAgents) {
+    const done = _completionTimes.length;
+    if (!done || !_stepStartTime) return null;
+    const elapsed = (Date.now() - _stepStartTime) / 1000; // seconds
+    const rate = done / elapsed; // agents/sec
+    const remaining = totalAgents - done;
+    const etaSec = remaining > 0 ? remaining / rate : 0;
+    const fmt = s => s < 60 ? `${Math.round(s)}s` : s < 3600 ? `${Math.floor(s/60)}m${Math.round(s%60)}s` : `${Math.floor(s/3600)}h${Math.floor((s%3600)/60)}m`;
+    return { done, total: totalAgents, rate, etaSec, rateStr: rate.toFixed(2), etaStr: fmt(etaSec) };
+  }
 
   // ── Build rows from records ───────────────────────────────────────────────
 
@@ -444,6 +458,20 @@ const Tree = (() => {
         style: isSelected ? 'fill:#ffd700' : row.stepFailed ? 'fill:#f44747' : row.inProgress ? 'fill:#4ec9b0' : row.queued ? 'fill:#555' : '',
       }, g).textContent = row.stepNum ? `Step ${row.stepNum}` : row.stepFailed ? 'failed' : row.inProgress ? 'running…' : row.queued ? 'queued' : '…';
 
+      if (row.inProgress) {
+        const liveTotal = row.agents.filter(a => !a.agent_killed && !a.agent_failed).length;
+        const stats = _progressStats(liveTotal);
+        if (stats && stats.done > 0) {
+          // Compact single line: "12/18 · 0.23/s · ETA 26s"
+          const etaPart = stats.etaSec > 1 ? ` · ETA ${stats.etaStr}` : '';
+          svgEl('text', {
+            x: lx, y: by + STEP_H - 5,
+            'text-anchor': 'middle',
+            style: 'font-size:8px; fill:#4ec9b0; opacity:0.8',
+          }, g).textContent = `${stats.done}/${stats.total} · ${stats.rateStr}/s${etaPart}`;
+        }
+      }
+
       if (row.opType) {
         svgEl('text', {
           x: lx, y: bcy,
@@ -674,8 +702,10 @@ const Tree = (() => {
       _agentLogs          = {};
       _runningKilledRanks = new Set();
       _selectedDoneRank   = null;
-      _pendingStepNum = stepNum || null;
-      _pendingOpName  = opName  || null;
+      _pendingStepNum     = stepNum || null;
+      _pendingOpName      = opName  || null;
+      _stepStartTime      = Date.now();
+      _completionTimes    = [];
       render();
     },
 
@@ -709,6 +739,7 @@ const Tree = (() => {
 
     onAgentCompleted(agentRank, state) {
       _inProgress[agentRank] = state;
+      _completionTimes.push(Date.now());
       delete _agentStatus[agentRank];
       // Keep _pendingAgents populated until step_completed so the in-progress
       // row stays visible the whole time; _inProgress tracks per-agent done state
