@@ -73,6 +73,7 @@ async def run_agent_claude(
     - Structured-output retries continue the same session (via --resume).
     """
     from src import ipc  # imported here to stay subprocess-friendly
+    from src.ipc import request_gpu_slot, release_gpu_slot
 
     agent_config  = agent_state.get("agent_config", {})
     workspace_dir = agent_state.get("workspace_dir") or None
@@ -109,13 +110,16 @@ async def run_agent_claude(
     last_error     = ""
     all_thinking:   List[str]   = []
     all_tool_calls: List[Tuple] = []
+    agent_rank   = agent_state.get("agent_rank", 0)
+    use_gpu_slot = bool(agent_config.get("use_gpu_slot", True))
 
     for attempt in range(attempts):
         send_prompt = prompt if attempt == 0 else (
             f"Error: {last_error}. "
             "Please respond with only a corrected JSON object."
         )
-
+        if use_gpu_slot:
+            await request_gpu_slot(agent_rank)
         try:
             raw, thinking, tool_calls, new_sid, cost, messages = await _invoke_claude(
                 prompt=send_prompt,
@@ -148,6 +152,9 @@ async def run_agent_claude(
                 )
             else:
                 raise
+        finally:
+            if use_gpu_slot:
+                release_gpu_slot(agent_rank)
 
         if new_sid:
             session_id = new_sid
@@ -420,7 +427,13 @@ async def _invoke_claude(
     stdout_task = asyncio.create_task(_read_stdout())
 
     await proc.wait()
-    await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+    results = await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+
+    # If _read_stdout raised (e.g. an error result event), surface that error
+    # first — it's more informative than the bare returncode below.
+    for exc in results:
+        if isinstance(exc, Exception):
+            raise exc
 
     if proc.returncode != 0:
         err = "\n".join(stderr_lines).strip() or f"exit code {proc.returncode}"

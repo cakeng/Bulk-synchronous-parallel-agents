@@ -41,7 +41,7 @@ _DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
 _RESERVED = frozenset({
     "base_url", "api_key", "model", "max_retries",
     "context", "system_prompt", "tools", "workspace_dir", "call_log",
-    "timeout",
+    "timeout", "use_gpu_slot",
 })
 
 
@@ -94,6 +94,7 @@ async def run_agent(
     workspace_dir = agent_state.get("workspace_dir")
     agent_rank    = int(agent_state.get("agent_rank", 0))
     llm_timeout   = float(agent_config.get("timeout", 600.0))
+    use_gpu_slot  = bool(agent_config.get("use_gpu_slot", True))
     client = AsyncOpenAI(
         base_url=agent_config["base_url"],
         api_key=agent_config["api_key"],
@@ -132,7 +133,7 @@ async def run_agent(
     if output_config is None:
         raw, thinking, tool_calls, extra = await _agentic_loop(
             client, model, ctx.messages, gen_kwargs, workspace_dir, tokens_used,
-            agent_rank=agent_rank, llm_timeout=llm_timeout,
+            agent_rank=agent_rank, llm_timeout=llm_timeout, use_gpu_slot=use_gpu_slot,
         )
         ctx.messages.extend(extra)
         ctx.assistant(raw)
@@ -168,7 +169,7 @@ async def run_agent(
 
         raw, thinking, tool_calls, extra = await _agentic_loop(
             client, model, working_context, gen_kwargs, workspace_dir, tokens_used,
-            agent_rank=agent_rank, llm_timeout=llm_timeout,
+            agent_rank=agent_rank, llm_timeout=llm_timeout, use_gpu_slot=use_gpu_slot,
         )
         # Accumulate tool intermediaries into working_context for the next retry
         working_context.extend(extra)
@@ -246,6 +247,7 @@ async def _agentic_loop(
     tokens_used: Dict[str, int],
     agent_rank: int = 0,
     llm_timeout: float = 600.0,
+    use_gpu_slot: bool = True,
 ) -> Tuple[str, List[str], List[Tuple], List[Dict]]:
     """Call the model in a loop, executing tool calls until a text response arrives.
 
@@ -275,6 +277,9 @@ async def _agentic_loop(
         call_index += 1
         _emit_status("Waiting for LLM")
         _emit_log(f"[LLM call #{call_index}] sending {len(current)} message(s)…")
+        if use_gpu_slot:
+            from src.ipc import request_gpu_slot, release_gpu_slot
+            await request_gpu_slot(agent_rank)
         try:
             response = await asyncio.wait_for(
                 client.chat.completions.create(model=model, messages=current, **gen_kwargs),
@@ -285,6 +290,9 @@ async def _agentic_loop(
                 f"[LLM call #{call_index}] no response after {llm_timeout:.0f}s — "
                 "vLLM may have dropped the request (check context length / server state)"
             )
+        finally:
+            if use_gpu_slot:
+                release_gpu_slot(agent_rank)
         message = response.choices[0].message
         raw, thinking = _extract_content(message)
         tool_calls    = _extract_tool_calls(message)

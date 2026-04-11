@@ -63,6 +63,29 @@ def release_tool_slot(agent_rank: int) -> None:
         print(json.dumps({"type": "tool_slot_release", "agent_rank": agent_rank}), flush=True)
 
 
+async def request_gpu_slot(agent_rank: int) -> None:
+    """Signal engine we need a GPU slot; suspend until the engine grants it."""
+    if is_connected():
+        emit({"type": "gpu_slot_request", "agent_rank": agent_rank})
+        await drain()
+        assert _reader is not None
+        await _reader.readline()   # consume {"type":"gpu_slot_grant"} response
+        return
+    # Fallback: legacy stdin handshake (standalone mode)
+    if sys.stdin.isatty():
+        return
+    print(json.dumps({"type": "gpu_slot_request", "agent_rank": agent_rank}), flush=True)
+    await asyncio.to_thread(sys.stdin.readline)
+
+
+def release_gpu_slot(agent_rank: int) -> None:
+    """Notify engine that the GPU slot is no longer needed."""
+    if is_connected():
+        emit({"type": "gpu_slot_release", "agent_rank": agent_rank})
+    elif not sys.stdin.isatty():
+        print(json.dumps({"type": "gpu_slot_release", "agent_rank": agent_rank}), flush=True)
+
+
 async def close() -> None:
     """Drain and close the TCP connection cleanly."""
     global _reader, _writer

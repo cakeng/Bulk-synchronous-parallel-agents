@@ -46,6 +46,10 @@ class Engine:
         self._tool_slots_available: int = 10
         self._tool_waiters: list = []   # min-heap of (rank, uid, asyncio.Event)
         self._tool_waiter_uid: int = 0  # monotonic counter used as heap tiebreaker
+        # GPU-slot semaphore state — re-initialised at the start of every run_operator call
+        self._gpu_slots_available: int = 4
+        self._gpu_waiters: list = []
+        self._gpu_waiter_uid: int = 0
 
     # ------------------------------------------------------------------
     # State management
@@ -53,7 +57,7 @@ class Engine:
 
     def initialize(self, llm_state: dict | None = None) -> None:
         self.agents = [Agent(agent_rank=0, llm_state=llm_state)]
-        self.globals = {"step": 0, "agent_size": 1}
+        self.globals = {"step": 0, "agent_size": 1, "max_concurrent_agents": 30, "gpu_slot_limit": 4}
         self._setup_agent_workspace(self.agents[0])
         log.print_engine("[Engine] Initialized new engine with 1 agent.")
 
@@ -171,6 +175,64 @@ class Engine:
             self._tool_slots_available += 1
 
     # ------------------------------------------------------------------
+    # GPU-slot priority semaphore
+    # ------------------------------------------------------------------
+
+    async def _acquire_gpu_slot(self, rank: int, stdin) -> None:
+        """Block until a GPU slot is available (legacy stdin mode)."""
+        if self._gpu_slots_available > 0:
+            self._gpu_slots_available -= 1
+            stdin.write(b"go\n")
+            await stdin.drain()
+            return
+        event = asyncio.Event()
+        uid = self._gpu_waiter_uid
+        self._gpu_waiter_uid += 1
+        heapq.heappush(self._gpu_waiters, (rank, uid, event))
+        try:
+            await event.wait()
+        except asyncio.CancelledError:
+            self._gpu_waiters = [t for t in self._gpu_waiters if t[2] is not event]
+            heapq.heapify(self._gpu_waiters)
+            raise
+        stdin.write(b"go\n")
+        await stdin.drain()
+
+    async def _acquire_gpu_slot_tcp(self, rank: int, writer: asyncio.StreamWriter) -> None:
+        """TCP variant: grant sent as JSON over the worker's TCP connection."""
+        if self._gpu_slots_available > 0:
+            self._gpu_slots_available -= 1
+            writer.write(b'{"type":"gpu_slot_grant"}\n')
+            try:
+                await writer.drain()
+            except Exception:
+                self._gpu_slots_available += 1
+            return
+        event = asyncio.Event()
+        uid = self._gpu_waiter_uid
+        self._gpu_waiter_uid += 1
+        heapq.heappush(self._gpu_waiters, (rank, uid, event))
+        try:
+            await event.wait()
+        except asyncio.CancelledError:
+            self._gpu_waiters = [t for t in self._gpu_waiters if t[2] is not event]
+            heapq.heapify(self._gpu_waiters)
+            raise
+        writer.write(b'{"type":"gpu_slot_grant"}\n')
+        try:
+            await writer.drain()
+        except Exception:
+            self._gpu_slots_available += 1
+
+    async def _release_gpu_slot(self) -> None:
+        """Return one GPU slot; wake the lowest-rank waiting agent if any."""
+        if self._gpu_waiters:
+            _, _, event = heapq.heappop(self._gpu_waiters)
+            event.set()
+        else:
+            self._gpu_slots_available += 1
+
+    # ------------------------------------------------------------------
     # Operator execution
     # ------------------------------------------------------------------
 
@@ -190,6 +252,11 @@ class Engine:
         self._tool_slots_available = limit
         self._tool_waiters = []
         self._tool_waiter_uid = 0
+        # Re-initialise GPU-slot semaphore for this step
+        gpu_limit = max(1, int(self.globals.get("gpu_slot_limit", 4)))
+        self._gpu_slots_available = gpu_limit
+        self._gpu_waiters = []
+        self._gpu_waiter_uid = 0
         operator_path = str(Path(operator_path).resolve())
 
         engine_vars: Dict[str, Any] = {"engine_globals": dict(self.globals)}
@@ -224,6 +291,10 @@ class Engine:
                                 await self._acquire_tool_slot_tcp(wrank, writer)
                             elif etype == "tool_slot_release":
                                 await self._release_tool_slot()
+                            elif etype == "gpu_slot_request":
+                                await self._acquire_gpu_slot_tcp(wrank, writer)
+                            elif etype == "gpu_slot_release":
+                                await self._release_gpu_slot()
                             else:
                                 event["agent_rank"] = wrank
                                 await ui_callback(event)
@@ -262,17 +333,28 @@ class Engine:
                 except Exception as exc:
                     raw_results.append(exc)
           else:
-            tasks = [
-                asyncio.create_task(
-                    self._run_agent_subprocess(
-                        agent, operator_path, engine_vars=engine_vars,
-                        verbose=verbose, ui_callback=ui_callback,
-                        engine_tcp_port=_engine_tcp_port,
-                    )
-                )
-                for agent in self.agents
+            max_concurrent = max(1, int(self.globals.get("max_concurrent_agents", 30)))
+            semaphore = asyncio.Semaphore(max_concurrent)
+
+            raw_results = [None] * len(self.agents)
+
+            async def _run_with_semaphore(idx: int, agent: Agent) -> None:
+                async with semaphore:
+                    try:
+                        result = await self._run_agent_subprocess(
+                            agent, operator_path, engine_vars=engine_vars,
+                            verbose=verbose, ui_callback=ui_callback,
+                            engine_tcp_port=_engine_tcp_port,
+                        )
+                    except Exception as exc:
+                        result = exc
+                    raw_results[idx] = result
+
+            worker_tasks = [
+                asyncio.create_task(_run_with_semaphore(i, agent))
+                for i, agent in enumerate(self.agents)
             ]
-            raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.gather(*worker_tasks, return_exceptions=True)
         finally:
             if _tcp_server is not None:
                 _tcp_server.close()
@@ -422,6 +504,12 @@ class Engine:
                                         continue
                                     if etype == "tool_slot_release":
                                         await self._release_tool_slot()
+                                        continue
+                                    if etype == "gpu_slot_request":
+                                        await self._acquire_gpu_slot(agent_rank, proc.stdin)
+                                        continue
+                                    if etype == "gpu_slot_release":
+                                        await self._release_gpu_slot()
                                         continue
                                     event["agent_rank"] = agent_rank
                                     await ui_callback(event)
