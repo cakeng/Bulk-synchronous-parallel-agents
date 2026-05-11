@@ -135,7 +135,7 @@ _SKIP: frozenset[str] = frozenset({
     "Exception", "ValueError", "TypeError", "KeyError", "IndexError",
     "AttributeError", "RuntimeError", "StopIteration", "NotImplementedError",
     "OSError", "IOError", "FileNotFoundError", "PermissionError",
-    "asyncio", "run_agent", "run_agent_claude", "copy_to_workspace", "clear_history",
+    "asyncio", "run_agent", "run_agent_claude", "run_agent_opencode", "copy_to_workspace", "clear_history",
     "Operator", "ForkOperator", "KillOperator", "SortOperator", "ShuffleOperator",
 })
 
@@ -170,7 +170,7 @@ def generate_full_code(op_name: str, body: str, op_type: str = "base") -> str:
 
     lines: list[str] = [
         f"from src.operator import {base_class}, copy_to_workspace, clear_history",
-        "from src.run_agent_claude import run_agent_claude as run_agent",
+        "from src.run_agent_opencode import run_agent_opencode as run_agent",
         "",
         _TAG_OP_TYPE.format(op_type),
         "",

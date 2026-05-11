@@ -5,7 +5,7 @@ model:
   # name: "Qwen/Qwen3-30B-A3B-Instruct-2507"
   # name: "Qwen/Qwen3.5-122B-A10B-FP8"
   # name: "Qwen/Qwen3.5-4B"
-  name: "Qwen/Qwen3.5-27B"
+  name: "Qwen/Qwen3.5-35B-A3B-FP8"
   
   # Trust remote code (required for some models)
   trust_remote_code: false
@@ -14,7 +14,7 @@ model:
 server:
   host: "127.0.0.1"
   port: 18000
-  api_key: "12f34rtfq34er234T34GARW5G" # Set to a string if you want API key authentication
+  api_key: "" # Set to a string if you want API key authentication
 
 # Generation Parameters
 generation:

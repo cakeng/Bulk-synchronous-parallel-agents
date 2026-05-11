@@ -16,13 +16,15 @@ class AgentState(dict):
     def clear_history(self) -> None:
         """Clear the chat context and call log, keeping all other agent variables.
 
-        Also clears ``claude_session_id`` so that run_agent_claude starts a
-        fresh Claude Code session rather than resuming the old one.
+        Also clears ``opencode_session_id`` (and the legacy ``claude_session_id``)
+        so that run_agent_opencode starts a fresh session rather than resuming
+        the old one.
         """
         cfg = self.get("agent_config")
         if cfg is not None:
             cfg["context"] = []
             cfg["call_log"] = []
+        self.pop("opencode_session_id", None)
         self.pop("claude_session_id", None)
 
 
